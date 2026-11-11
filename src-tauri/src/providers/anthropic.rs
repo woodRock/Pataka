@@ -18,8 +18,7 @@ fn supports_fallbacks(model: &str) -> bool {
         "claude-fable-5-1",
         "claude-sonnet-5-5",
     ]
-    .iter()
-    .any(|m| model == *m)
+    .contains(&model)
 }
 
 pub fn headers(req: reqwest::RequestBuilder, api_key: Option<&str>, fallbacks: bool) -> reqwest::RequestBuilder {
