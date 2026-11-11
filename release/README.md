@@ -1,12 +1,12 @@
 # Pātaka installers
 
-Linux and Windows installers are built locally with the scripts in `../scripts/` and committed here. The macOS `.dmg` is built by the *macOS build* GitHub Actions workflow and attached to the [GitHub Release](https://github.com/woodRock/Pataka/releases/latest), together with these files.
+Installers are built locally with the scripts in `../scripts/` and committed here. The *macOS build* GitHub Actions workflow can also build the macOS `.dmg` and attach it to the [GitHub Release](https://github.com/woodRock/Pataka/releases/latest), together with these files.
 
 | Folder | Contents | Built with |
 |---|---|---|
 | `linux/` | `.deb`, `.rpm`, `.AppImage` (x86_64) | `scripts/build-linux.sh` |
 | `windows/` | NSIS `-setup.exe` installer (x86_64) | `scripts/build-windows.sh` (cross-compiled) or `scripts/build-windows.ps1` |
-| `macos/` | universal `.dmg` (only when built locally on a Mac) | `scripts/build-macos.sh`, or the *macOS build* workflow |
+| `macos/` | universal `.dmg` and zipped `.app` (Apple silicon + Intel) | `scripts/build-macos.sh`, or the *macOS build* workflow |
 
 Verify before installing:
 

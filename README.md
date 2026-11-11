@@ -29,7 +29,7 @@ Download the installer for your platform. The links fetch the files committed in
 | Linux (Debian, Ubuntu) | [Pataka_0.2.0_amd64.deb](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.2.0_amd64.deb) | `sudo apt install ./Pataka_0.2.0_amd64.deb` |
 | Linux (Fedora, openSUSE) | [Pataka-0.2.0-1.x86_64.rpm](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka-0.2.0-1.x86_64.rpm) | `sudo dnf install ./Pataka-0.2.0-1.x86_64.rpm` |
 | Linux (any) | [Pataka_0.2.0_amd64.AppImage](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.2.0_amd64.AppImage) | `chmod +x` it and run |
-| macOS 13+ (Apple silicon and Intel) | Not built yet: see below | Build it on a Mac with `scripts/build-macos.sh`, or with the *macOS build* workflow once GitHub Actions is available on the account. Unsigned: right-click the app and choose *Open* the first time. |
+| macOS 13+ (Apple silicon and Intel) | [Pataka_0.2.0_universal.dmg](https://github.com/woodRock/Pataka/raw/main/release/macos/Pataka_0.2.0_universal.dmg) | Open the disk image and drag Pātaka to Applications. Not notarised: the first time, right-click the app and choose *Open* (on macOS 15+, use *System Settings → Privacy & Security → Open Anyway*). |
 
 Check a download before installing:
 
@@ -41,7 +41,7 @@ shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
 ### How the installers are built
 
 - **Linux and Windows** are built locally with `scripts/build-linux.sh` and `scripts/build-windows.sh`, then committed to [`release/`](release/).
-- **macOS** has to be built on a Mac. Either run `scripts/build-macos.sh` on a Mac and commit `release/macos/`, or use the [macOS build](.github/workflows/macos.yml) workflow (**Actions → macOS build → Run workflow**). With *publish* ticked, the workflow creates the GitHub Release `v<version>` with the macOS `.dmg` and the Linux and Windows installers from `release/`. GitHub Actions only runs while the account has no billing lock: a locked account cannot start jobs, even free ones on public repositories.
+- **macOS** has to be built on a Mac. The committed `.dmg` was built with `scripts/build-macos.sh` and committed to `release/macos/`. Alternatively, use the [macOS build](.github/workflows/macos.yml) workflow (**Actions → macOS build → Run workflow**). With *publish* ticked, the workflow creates the GitHub Release `v<version>` with the macOS `.dmg` and the Linux and Windows installers from `release/`. GitHub Actions only runs while the account has no billing lock: a locked account cannot start jobs, even free ones on public repositories.
 
 ## Getting started
 
