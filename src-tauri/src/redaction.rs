@@ -165,6 +165,20 @@ pub fn detect(
     spans
 }
 
+/// The original values behind this kōrero's placeholders, as terms.
+fn known_terms(vault: &Vault) -> Vec<Term> {
+    vault
+        .entities
+        .iter()
+        .filter_map(|(key, placeholder)| {
+            let label = key.split('|').next()?;
+            let category = Category::ALL.into_iter().find(|c| c.label() == label)?;
+            let term = vault.placeholders.get(placeholder)?.clone();
+            Some(Term { term, category })
+        })
+        .collect()
+}
+
 fn generalise(span: &Span) -> String {
     if span.category == Category::Date {
         let year = span
@@ -190,7 +204,19 @@ pub fn redact(
     model: &[Span],
     vault: &mut Vault,
 ) -> Outcome {
-    let spans = detect(text, kaupapa, extra_terms, extra_allow, model);
+    // Anything this kōrero has already pseudonymised is caught again wherever
+    // it appears, even where no detector would find it this time (a model
+    // reply that repeats a name, a name in a different sentence).
+    let mut terms = extra_terms.to_vec();
+    terms.extend(known_terms(vault));
+    let mut spans = detect(text, kaupapa, &terms, extra_allow, model);
+    // Placeholders already in the text (in a model's reply) stay as they are.
+    let issued: Vec<(usize, usize)> = vault
+        .placeholders
+        .keys()
+        .flat_map(|p| text.match_indices(p.as_str()).map(|(i, m)| (i, i + m.len())))
+        .collect();
+    spans.retain(|s| !issued.iter().any(|&(a, b)| s.start < b && a < s.end));
     let policy = &kaupapa.policy;
     let mut findings = Vec::with_capacity(spans.len());
     let mut blocked = false;
@@ -384,6 +410,49 @@ mod tests {
         };
         let o = redact("Āpirana Ngata wrote about this.", &k, &[], &[], &[], &mut v);
         assert_eq!(o.output, "Āpirana Ngata wrote about this.");
+    }
+
+    #[test]
+    fn known_values_are_caught_again() {
+        let mut v = Vault::default();
+        let k = Kaupapa {
+            gazetteer: vec![Term {
+                term: "Jesse Wood".into(),
+                category: Category::Person,
+            }],
+            ..kaupapa()
+        };
+        redact("Ko Jesse Wood tōku ingoa.", &k, &[], &[], &[], &mut v);
+        // A later message, with no list entry and no model, still has it caught.
+        let o = redact(
+            "Kia ora Jesse Wood! [PERSON_1] is welcome.",
+            &kaupapa(),
+            &[],
+            &[],
+            &[],
+            &mut v,
+        );
+        assert_eq!(o.output, "Kia ora [PERSON_1]! [PERSON_1] is welcome.");
+    }
+
+    #[test]
+    fn placeholders_are_not_redacted_again() {
+        let mut v = Vault::default();
+        redact("Email hemi@example.co.nz", &kaupapa(), &[], &[], &[], &mut v);
+        let text = "Reply to [EMAIL_1] today.";
+        let start = text.find("[EMAIL_1]").unwrap();
+        let model = [Span {
+            start,
+            end: start + "[EMAIL_1]".len(),
+            text: "[EMAIL_1]".into(),
+            category: Category::Person,
+            confidence: 0.9,
+            source: Source::Model,
+            detector: "test".into(),
+            checksum: Checksum::None,
+            note: None,
+        }];
+        assert_eq!(redact(text, &kaupapa(), &[], &[], &model, &mut v).output, text);
     }
 
     #[test]

@@ -201,8 +201,9 @@ struct Built {
 /// Build exactly what would be sent: the whole history plus the new
 /// message. When the destination is off the device, every user message is
 /// redacted again from its original text under the current kaupapa (so a
-/// term added later protects earlier turns too), and replies from on-device
-/// models are redacted as well, since they may echo real names.
+/// term added later protects earlier turns too). Replies are redacted as
+/// well: one from an on-device model may contain real values, and one from a
+/// cloud model may repeat a value that reached it before it was protected.
 fn build_outbound(
     conv: &Conversation,
     text: &str,
@@ -249,13 +250,11 @@ fn build_outbound(
                 }
                 let content = if !redact {
                     redaction::restore(&m.text, &vault)
-                } else if reply_needs_redaction(m) {
+                } else {
                     let r = redaction::redact(&m.text, k, &conv.terms, &conv.allow, model.get(&m.text)?, &mut vault);
                     history_findings += r.findings.len();
                     history_blocked |= r.blocked;
                     r.output
-                } else {
-                    m.text.clone()
                 };
                 push("assistant", content, &mut out);
             }
@@ -280,12 +279,6 @@ fn build_outbound(
         history_blocked,
         redacted: redact,
     })
-}
-
-/// Replies from models off the device only ever saw placeholders; replies
-/// from on-device models may contain real values, so they are redacted too.
-fn reply_needs_redaction(m: &Message) -> bool {
-    m.trust != Some(Trust::Offshore) && m.trust != Some(Trust::Sovereign)
 }
 
 /// The name model's spans for every text that will be redacted.
@@ -335,12 +328,7 @@ async fn model_spans_for(
     if !redact || !k.use_model || !student::is_installed(&root) {
         return Ok(ModelSpans::default());
     }
-    let mut texts: Vec<String> = conv
-        .messages
-        .iter()
-        .filter(|m| m.role == Role::User || reply_needs_redaction(m))
-        .map(|m| m.text.clone())
-        .collect();
+    let mut texts: Vec<String> = conv.messages.iter().map(|m| m.text.clone()).collect();
     texts.push(text.to_string());
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -395,7 +383,9 @@ fn prepare(
     let needs_review = built.redacted
         && match settings.kaupapa.review {
             ReviewMode::Always => true,
-            ReviewMode::WhenFound => !built.new.findings.is_empty() || flagged,
+            // Without the name model, finding nothing does not mean there is
+            // nothing to find (names, places), so the person checks it first.
+            ReviewMode::WhenFound => !built.new.findings.is_empty() || flagged || !spans.used(),
             ReviewMode::Never => false,
         };
     let blocked = !reasons.is_empty();
@@ -1404,6 +1394,68 @@ mod tests {
         assert!(!all.contains("Aroha"), "{all}");
         assert!(!all.contains("aroha@example.nz"), "{all}");
         assert!(all.contains("[PERSON_1]"));
+    }
+
+    fn person(text: &str, name: &str) -> Vec<Span> {
+        text.match_indices(name)
+            .map(|(start, m)| Span {
+                start,
+                end: start + m.len(),
+                text: m.into(),
+                category: Category::Person,
+                confidence: 0.99,
+                source: tumataiti_rules::Source::Model,
+                detector: "test".into(),
+                checksum: tumataiti_rules::Checksum::None,
+                note: None,
+            })
+            .collect()
+    }
+
+    /// A first message went out before the name model was installed, and the
+    /// cloud model's reply repeated the name. Once the model is on, neither
+    /// the earlier message nor the reply may carry the name out again.
+    #[test]
+    fn cloud_reply_repeating_a_name_is_redacted() {
+        let settings = Settings::default();
+        let user = "Ko Jesse Wood tōku ingoa.";
+        let reply = "Kia ora Jesse Wood!";
+        let c = conv(vec![
+            msg(Role::User, user, Some(Trust::Offshore)),
+            msg(Role::Assistant, reply, Some(Trust::Offshore)),
+        ]);
+        let mut map = HashMap::new();
+        map.insert(user.to_string(), person(user, "Jesse Wood"));
+        map.insert(reply.to_string(), Vec::new()); // the model misses it here
+        map.insert("Thanks".to_string(), Vec::new());
+        let spans = ModelSpans { map: Some(map) };
+        let b = build_outbound(&c, "Thanks", &settings, Trust::Offshore, &spans).unwrap();
+        let all: String = b
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(!all.contains("Jesse"), "{all}");
+        assert_eq!(b.messages[1].content, "Kia ora [PERSON_1]!");
+    }
+
+    #[test]
+    fn rules_only_always_asks_for_review() {
+        let settings = Settings::default();
+        let p = settings.providers.iter().find(|p| p.id == "anthropic").unwrap();
+        let c = conv(vec![]);
+        let (preview, _) = prepare(
+            &c,
+            "Ko Jesse Wood tōku ingoa.",
+            &settings,
+            p,
+            "claude-opus-5-5",
+            &ModelSpans::default(),
+        )
+        .unwrap();
+        assert!(preview.findings.is_empty());
+        assert!(preview.needs_review);
     }
 
     #[test]
