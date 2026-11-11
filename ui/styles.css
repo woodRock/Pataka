@@ -251,3 +251,7 @@ th { font-weight: 600; color: var(--muted); }
   .app { grid-template-columns: 220px 1fr; }
   .grid2 { grid-template-columns: 1fr; }
 }
+
+.model-box { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; }
+.model-box h3 { margin: 0 0 4px; }
+.ok { color: var(--accent); }

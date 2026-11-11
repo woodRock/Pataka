@@ -26,9 +26,19 @@ Files are written atomically (temporary file, then rename) with owner-only permi
 ### Network
 
 - The window has no network access. Its Content-Security-Policy is `default-src 'self'`, with `connect-src` limited to Tauri's IPC, no inline scripts or styles, no frames, objects or workers, `base-uri 'none'` and `form-action 'none'`. Navigation away from the app's own pages is refused.
-- All requests are made in Rust (`src-tauri/src/providers/`), and only after redaction and the sovereignty check. TLS is rustls with TLS 1.2 or later. **Redirects are refused** so an API key cannot be carried to another host. Connect and read timeouts are bounded, and reply size is capped.
+- All requests are made in Rust (`src-tauri/src/providers/`), and only after redaction and the sovereignty check. TLS is rustls with TLS 1.2 or later, trusting the operating system's certificate store (so enterprise TLS inspection works as it does for the rest of the system), with Mozilla's roots as a fallback. **Redirects are refused** so an API key cannot be carried to another host. Connect and read timeouts are bounded, and reply size is capped.
 - Remote providers must use `https://`. Plain `http://` is accepted only for loopback addresses (`localhost`, `127.0.0.0/8`, `::1`). Credentials in URLs are rejected. Changing a provider's address deletes its stored key, so a key cannot be redirected by editing the URL.
 - No telemetry, analytics, crash reporting, update checks or remote fonts.
+
+### The Tūmataiti name model
+
+- Installed only when you press **Install**. Downloads come from the pinned revision of `woodrock/tumataiti-deberta-v3-small-open` on Hugging Face, and from Microsoft's ONNX Runtime 1.31.0 release on GitHub. Redirects are followed only over HTTPS to those services' own download hosts.
+- The SHA-256 of every file (model, tokeniser, config, ONNX Runtime archive and the extracted library) is compiled into Pātaka (`src-tauri/src/student.rs`). A download that does not match is discarded. The files are checked again each time the model loads, so a file changed on disk is refused.
+- ONNX Runtime's telemetry is switched off explicitly.
+- The model runs on this device. Its spans go through Tūmataiti's review step (a lone kinship word like *Koro* is flagged rather than redacted, and IDs are relabelled by their check digits), then merge with the rules.
+- **Fail closed:** if the model is switched on and installed but cannot load or run, nothing is sent. The error says how to switch it off and send with the rules only.
+- Detected spans are cached in memory by text hash to avoid re-running the model over the history. The cache is dropped on lock.
+- On macOS, loading a library that was not signed with Pātaka needs the `com.apple.security.cs.disable-library-validation` entitlement (`src-tauri/Entitlements.plist`). The hash check before loading stands in for Apple's library validation.
 
 ### The window (Tauri)
 
@@ -49,7 +59,8 @@ Files are written atomically (temporary file, then rename) with owner-only permi
 | Threat | Mitigation |
 |---|---|
 | A cloud provider logs or retains prompts | Only Tūmataiti-redacted text leaves the device. Tapu kōrero only go to on-device or sovereign providers. |
-| Missed personal data (false negatives) | Checksum-validated rules, kaitiaki lists, a review step that shows the full outbound text, and fail-closed blocking for secrets and tapu terms |
+| Missed personal data (false negatives) | Checksum-validated rules, the Tūmataiti name model, kaitiaki lists, a review step that shows the full outbound text, and fail-closed blocking for secrets and tapu terms |
+| Tampered model or runtime files | Pinned SHA-256 for every file, checked at download and at every load |
 | An earlier on-device conversation is later sent to the cloud | The whole history is redacted again whenever the destination is off the device |
 | Someone with access to the disk or a backup | Everything is encrypted. With a passphrase, the data cannot be read without it. |
 | Malware running as the same user | Out of scope once Pātaka is unlocked. With a passphrase, data at rest is still protected while locked. |
@@ -61,7 +72,7 @@ Files are written atomically (temporary file, then rename) with owner-only permi
 
 ## Known limits
 
-- Names and addresses are only detected through kaitiaki lists. The Tūmataiti name model is not bundled yet.
+- No detector is perfect. Without the name model (not installed, switched off, or on Intel Macs), names and addresses are only detected through kaitiaki lists.
 - The system prompt is not redacted; keep personal details out of it.
 - Installers are unsigned.
 - If you forget your passphrase, your data cannot be recovered. That is deliberate.

@@ -125,10 +125,21 @@ fn term_spans(text: &str, terms: &[Term], detector: &str, out: &mut Vec<Span>) {
     }
 }
 
-/// Detect spans: Tūmataiti rules, the kaitiaki gazetteer, tapu terms and the
-/// kōrero's own terms, merged, minus anything on an allow-list.
-pub fn detect(text: &str, kaupapa: &Kaupapa, extra_terms: &[Term], extra_allow: &[String]) -> Vec<Span> {
+/// Detect spans: Tūmataiti rules, the student model's spans (if any), the
+/// kaitiaki gazetteer, tapu terms and the kōrero's own terms. Model spans go
+/// through Tūmataiti's review step (kinship words are flagged, IDs are
+/// relabelled by their check digits), then everything is merged and anything
+/// on an allow-list is removed.
+pub fn detect(
+    text: &str,
+    kaupapa: &Kaupapa,
+    extra_terms: &[Term],
+    extra_allow: &[String],
+    model: &[Span],
+) -> Vec<Span> {
     let mut candidates = tumataiti_rules::rules::candidates(text);
+    candidates.extend(model.iter().cloned());
+    tumataiti_rules::review::review(&mut candidates);
     term_spans(text, &kaupapa.gazetteer, "gazetteer", &mut candidates);
     term_spans(text, extra_terms, "korero_term", &mut candidates);
     let tapu: Vec<Term> = kaupapa
@@ -176,9 +187,10 @@ pub fn redact(
     kaupapa: &Kaupapa,
     extra_terms: &[Term],
     extra_allow: &[String],
+    model: &[Span],
     vault: &mut Vault,
 ) -> Outcome {
-    let spans = detect(text, kaupapa, extra_terms, extra_allow);
+    let spans = detect(text, kaupapa, extra_terms, extra_allow, model);
     let policy = &kaupapa.policy;
     let mut findings = Vec::with_capacity(spans.len());
     let mut blocked = false;
@@ -275,7 +287,7 @@ mod tests {
     #[test]
     fn email_pseudonymised_and_restored() {
         let mut v = Vault::default();
-        let o = redact("Email hemi@example.co.nz please", &kaupapa(), &[], &[], &mut v);
+        let o = redact("Email hemi@example.co.nz please", &kaupapa(), &[], &[], &[], &mut v);
         assert!(!o.blocked);
         assert_eq!(o.output, "Email [EMAIL_1] please");
         assert_eq!(restore("Sent to [EMAIL_1].", &v), "Sent to hemi@example.co.nz.");
@@ -291,7 +303,7 @@ mod tests {
             }],
             ..kaupapa()
         };
-        let a = redact("Kia ora, ko Hēmi Te Rangi tēnei.", &k, &[], &[], &mut v);
+        let a = redact("Kia ora, ko Hēmi Te Rangi tēnei.", &k, &[], &[], &[], &mut v);
         let b = redact(
             "Did hemi te rangi call? Also Aroha.",
             &k,
@@ -299,6 +311,7 @@ mod tests {
                 term: "Aroha".into(),
                 category: Category::Person,
             }],
+            &[],
             &[],
             &mut v,
         );
@@ -320,7 +333,7 @@ mod tests {
             tapu_terms: vec!["karakia tapu".into()],
             ..kaupapa()
         };
-        let o = redact("Here is the Karakia Tapu text", &k, &[], &[], &mut v);
+        let o = redact("Here is the Karakia Tapu text", &k, &[], &[], &[], &mut v);
         assert!(o.blocked);
         assert!(o.output.is_empty());
     }
@@ -333,7 +346,7 @@ mod tests {
             allow_list: vec!["wahi tapu".into()],
             ..kaupapa()
         };
-        assert!(redact("the wāhi tapu site", &k, &[], &[], &mut v).blocked);
+        assert!(redact("the wāhi tapu site", &k, &[], &[], &[], &mut v).blocked);
     }
 
     #[test]
@@ -344,6 +357,7 @@ mod tests {
             &kaupapa(),
             &[],
             &[],
+            &[],
             &mut v,
         );
         assert!(o.blocked);
@@ -352,7 +366,7 @@ mod tests {
     #[test]
     fn ird_masked() {
         let mut v = Vault::default();
-        let o = redact("My IRD number is 49-091-850", &kaupapa(), &[], &[], &mut v);
+        let o = redact("My IRD number is 49-091-850", &kaupapa(), &[], &[], &[], &mut v);
         assert!(o.output.contains("[NZ_GOV_ID]"), "{}", o.output);
         assert!(!o.output.contains("49-091-850"));
     }
@@ -368,7 +382,7 @@ mod tests {
             allow_list: vec!["Apirana Ngata".into()],
             ..kaupapa()
         };
-        let o = redact("Āpirana Ngata wrote about this.", &k, &[], &[], &mut v);
+        let o = redact("Āpirana Ngata wrote about this.", &k, &[], &[], &[], &mut v);
         assert_eq!(o.output, "Āpirana Ngata wrote about this.");
     }
 
@@ -376,5 +390,59 @@ mod tests {
     fn whole_words_only() {
         assert_eq!(find_term("Mere and Meremere", "mere"), vec![(0, 4)]);
         assert_eq!(find_term("ko Ōtaki", "otaki"), vec![(3, 9)]);
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    fn model_span(text: &str, needle: &str, category: Category, confidence: f32) -> Span {
+        let start = text.find(needle).unwrap();
+        Span {
+            start,
+            end: start + needle.len(),
+            text: needle.into(),
+            category,
+            confidence,
+            source: Source::Model,
+            detector: "test-model".into(),
+            checksum: Checksum::None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn model_names_are_pseudonymised() {
+        let text = "Ask Hēmi Te Rangi from Ngāti Porou.";
+        let model = [
+            model_span(text, "Hēmi Te Rangi", Category::Person, 0.98),
+            model_span(text, "Ngāti Porou", Category::Affiliation, 0.95),
+        ];
+        let mut v = Vault::default();
+        let o = redact(text, &Kaupapa::default(), &[], &[], &model, &mut v);
+        assert_eq!(o.output, "Ask [PERSON_1] from [AFFILIATION_1].");
+    }
+
+    #[test]
+    fn kinship_word_alone_is_flagged_not_redacted() {
+        let text = "Koro said hello.";
+        let model = [model_span(text, "Koro", Category::Person, 0.9)];
+        let mut v = Vault::default();
+        let o = redact(text, &Kaupapa::default(), &[], &[], &model, &mut v);
+        assert_eq!(o.output, text);
+        assert_eq!(o.findings[0].action, Action::Flag);
+    }
+
+    #[test]
+    fn allow_list_beats_the_model() {
+        let text = "Āpirana Ngata wrote this.";
+        let model = [model_span(text, "Āpirana Ngata", Category::Person, 0.99)];
+        let k = Kaupapa {
+            allow_list: vec!["Apirana Ngata".into()],
+            ..Kaupapa::default()
+        };
+        let mut v = Vault::default();
+        assert_eq!(redact(text, &k, &[], &[], &model, &mut v).output, text);
     }
 }

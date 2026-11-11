@@ -53,7 +53,8 @@ These follow Tūmataiti's recall-first defaults. Policy for affiliation, health 
 ## What the software cannot do
 
 - It cannot decide what is tapu, or who should see mātauranga. **The tool flags; people decide.**
-- Rules alone do not find names or places. Until the Tūmataiti name model is bundled, people's names, whakapapa and places are only redacted if they are on a kaitiaki list or added in the review step.
+- No detector finds everything. The Tūmataiti name model runs on the device and finds most names, addresses and affiliation. Without it, they are only redacted if they are on a kaitiaki list or added in the review step.
+- The name model is a derived artefact of its training data, and its governance (who may change it, and how communities can ask for changes) sits with the Tūmataiti project. Pātaka pins one published version by hash and never updates it silently.
 - Redaction reduces risk; it does not anonymise. A capable model can sometimes infer identity from context.
 - Once text reaches a provider, that provider's terms and jurisdiction apply.
 

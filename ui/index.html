@@ -81,7 +81,7 @@
       <section id="messages" class="messages" aria-live="polite"></section>
       <div id="empty" class="empty hidden">
         <h2>Kia ora</h2>
-        <p>Start a kōrero. Before anything leaves this device, Tūmataiti finds NZ identifiers (IRD, NHI, bank accounts, cards, passports, licences), contact details, secrets and the names and places on your kaitiaki lists, and replaces them with placeholders. Replies are restored here, on your device.</p>
+        <p>Start a kōrero. Before anything leaves this device, Tūmataiti finds NZ identifiers (IRD, NHI, bank accounts, cards, passports, licences), contact details, secrets, the names and places on your kaitiaki lists and, with the name model installed, people's names, addresses and affiliation in context. It replaces them with placeholders, and replies are restored here, on your device.</p>
         <p class="muted">Mark a kōrero <strong>Tapu</strong> to keep it to models on this device (for example Ollama) or on infrastructure you have marked sovereign.</p>
       </div>
 
@@ -106,13 +106,13 @@
       <pre id="review-outbound" class="outbound"></pre>
       <p id="review-history" class="muted small"></p>
       <h3>What Tūmataiti found</h3>
-      <table class="findings"><thead><tr><th>Text (stays here)</th><th>Category</th><th>Action</th><th>Sent as</th><th></th></tr></thead><tbody id="review-findings"></tbody></table>
+      <table class="findings"><thead><tr><th>Text (stays here)</th><th>Category</th><th>Found by</th><th>Action</th><th>Sent as</th><th></th></tr></thead><tbody id="review-findings"></tbody></table>
       <div class="add-term">
         <input id="review-term" placeholder="Something else to redact, e.g. a name or marae">
         <select id="review-term-cat"></select>
         <button type="button" id="review-add">Redact this too</button>
       </div>
-      <p class="hint">Rules find structured identifiers. Names, places and whakapapa are only caught when they are on your kaitiaki lists or added here, so read the text above before sending.</p>
+      <p id="review-hint" class="hint"></p>
       <div class="dialog-actions">
         <button value="cancel">Cancel</button>
         <button value="send" id="review-send" class="primary">Send</button>
@@ -156,6 +156,17 @@
       </section>
 
       <section data-panel="policy" class="panel hidden">
+        <div class="model-box">
+          <h3>Name model</h3>
+          <p class="muted small">The rules find structured identifiers. Tūmataiti's name model finds people's names, addresses and affiliation (iwi, hapū, marae) in context. It runs on this device; nothing is sent anywhere.</p>
+          <p id="model-status"></p>
+          <p id="model-progress" class="small muted"></p>
+          <div class="row">
+            <button id="model-install" class="primary">Install</button>
+            <button id="model-remove" class="danger">Remove</button>
+          </div>
+          <label class="check"><input type="checkbox" id="policy-use-model"> Use the name model when it is installed</label>
+        </div>
         <p class="muted">What Tūmataiti does with each kind of information before it leaves this device. <strong>Pseudonymise</strong> uses a placeholder like [PERSON_1] that is restored in replies; <strong>mask</strong> removes it for good; <strong>block</strong> stops the message.</p>
         <table class="policy-table"><thead><tr><th>Category</th><th>Action</th></tr></thead><tbody id="policy-rows"></tbody></table>
         <label>Confidence threshold <input type="number" id="policy-threshold" min="0" max="1" step="0.05"></label>
@@ -222,7 +233,7 @@
           <li><strong>Manaakitanga (care).</strong> Tūmataiti redacts before sending, and the review step shows you the outbound text in full.</li>
           <li><strong>Kaitiakitanga (guardianship).</strong> A tamper-evident audit log records what kinds of data went where, without storing the data itself. You can export or delete everything at any time.</li>
         </ul>
-        <p class="muted">Redaction reduces risk; it does not remove it. Tūmataiti's rules find structured identifiers. Names, places and whakapapa are only caught when they are on a kaitiaki list. Decisions about mātauranga belong to the people it comes from: the tool flags, people decide.</p>
+        <p class="muted">Redaction reduces risk; it does not remove it. Tūmataiti's rules find structured identifiers, and its name model finds most names, addresses and affiliation, but no detector catches everything: read what will be sent. Decisions about mātauranga belong to the people it comes from: the tool flags, people decide.</p>
         <p class="muted small">Detector: <code id="about-detector"></code>. Pātaka is open source under the Apache 2.0 licence.</p>
       </section>
     </div>

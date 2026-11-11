@@ -85,7 +85,7 @@ pub struct Term {
 }
 
 /// The redaction policy, set by the person or their kaitiaki.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Kaupapa {
     pub policy: Policy,
@@ -98,6 +98,22 @@ pub struct Kaupapa {
     pub tapu_terms: Vec<String>,
     /// Names that may be sent unchanged, e.g. tūpuna or public figures discussed in research.
     pub allow_list: Vec<String>,
+    /// Use the Tūmataiti name model when it is installed.
+    pub use_model: bool,
+}
+
+impl Default for Kaupapa {
+    fn default() -> Self {
+        Kaupapa {
+            policy: Policy::default(),
+            review: ReviewMode::default(),
+            redact_on_device: false,
+            gazetteer: Vec::new(),
+            tapu_terms: Vec::new(),
+            allow_list: Vec::new(),
+            use_model: true,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -8,7 +8,7 @@ Built with Rust and [Tauri 2](https://tauri.app). The window is plain HTML, CSS 
 
 ## What it does
 
-- **Local redaction with Tūmataiti.** IRD numbers (mod-11 checked), NHI numbers, bank accounts, payment cards (Luhn checked), passports and driver licences, NZ phone numbers, emails, URLs, IP addresses, labelled dates of birth or death, and API keys or passwords are found by the Tūmataiti rules. Names, places, iwi, hapū, marae and whānau come from **kaitiaki lists** that you or your data steward maintain. Each is pseudonymised (`[PERSON_1]`), generalised (`[YEAR 1984]`), masked (`[NZ_GOV_ID]`) or blocked, per a policy you control.
+- **Local redaction with Tūmataiti, rules and model.** The Tūmataiti rules find IRD numbers (mod-11 checked), NHI numbers, bank accounts, payment cards (Luhn checked), passports and driver licences, NZ phone numbers, emails, URLs, IP addresses, labelled dates of birth or death, and API keys or passwords. The **Tūmataiti name model** (DeBERTa-v3-small, fine-tuned on NZ and te reo Māori text) finds people's names, addresses and affiliation (iwi, hapū, marae) in context. It runs natively on your device through ONNX Runtime. **Kaitiaki lists** that you or your data steward maintain add names, places and tapu terms. Everything is merged by Tūmataiti's own review and merge steps. Each item is pseudonymised (`[PERSON_1]`), generalised (`[YEAR 1984]`), masked (`[NZ_GOV_ID]`) or blocked, per a policy you control.
 - **Consistent placeholders across a kōrero.** The same person keeps the same placeholder across every turn. When a message goes to the cloud, the whole history is redacted again under the current policy, so a term added later also protects earlier turns.
 - **Review before sending.** See exactly what the model will receive, with each placeholder highlighted. You can add something else to redact, or allow a term through, before you send.
 - **Tapu and noa kōrero.** Mark a conversation *tapu* and Pātaka will only send it to a model on this device or on infrastructure you have marked *sovereign*. Pātaka works out "on this device" from the address; a remote server cannot claim it.
@@ -41,8 +41,9 @@ cd release && sha256sum -c SHA256SUMS --ignore-missing
 
 1. Open Pātaka and choose how to protect your data: a **passphrase** (recommended) or the **OS keychain**.
 2. Open **Settings → Providers**. For a local model, start [Ollama](https://ollama.com) and press **Fetch models** on the Ollama card. For a cloud model, paste an API key into its card. Keys are stored encrypted and never shown again.
-3. Open **Settings → Kaitiaki lists** and add the names, marae, hapū, places and tapu terms that should never leave the device unredacted.
-4. Start a **Kōrero hou** (general) or a **Tapu** kōrero (on-device or sovereign models only).
+3. Open **Settings → Tūmataiti** and press **Install** under *Name model*. This is a one-time download of about 170 MB (250 MB on Windows): the model from Hugging Face and ONNX Runtime from Microsoft's GitHub release. Every file is checked against a SHA-256 built into Pātaka.
+4. Open **Settings → Kaitiaki lists** and add the names, marae, hapū, places and tapu terms that should always be protected, whatever the model finds.
+5. Start a **Kōrero hou** (general) or a **Tapu** kōrero (on-device or sovereign models only).
 
 ## Build it yourself
 
@@ -71,7 +72,9 @@ Because there is no CI, run `scripts/install-hooks.sh` once. It adds a git pre-p
 
 ```
 src-tauri/src/
-  redaction.rs     Tūmataiti rules + kaitiaki lists, persistent placeholder vault, restore
+  redaction.rs     Tūmataiti rules + name model + kaitiaki lists, persistent placeholder vault, restore
+  student.rs       Tūmataiti name model: tokenising, ONNX Runtime inference, span decoding (pinned hashes)
+  model_install.rs one-time, hash-verified download of the model and ONNX Runtime
   sovereignty.rs   on-device / sovereign / offshore rules, tapu routing, URL checks
   crypto.rs        XChaCha20-Poly1305 and Argon2id
   store.rs         encrypted files, keychain or passphrase key, secure delete
@@ -87,7 +90,8 @@ release/           committed installers and SHA256SUMS
 
 Redaction reduces risk; it does not remove it.
 
-- The Tūmataiti rules find structured identifiers. **Names, addresses and whakapapa are only caught if they are on a kaitiaki list** or added in the review step. The Tūmataiti name model (ONNX) is not bundled yet. Always read the outbound text in the review step.
+- No detector catches everything. Tūmataiti's own evaluation finds that rules plus a student model still miss personal information in some held-out NZ documents (see its [results](https://github.com/woodRock/tumataiti/tree/main/ml/results)). Always read the outbound text in the review step.
+- Without the name model installed (or on Intel Macs, which ONNX Runtime 1.31 has no build for), **names, addresses and whakapapa are only caught if they are on a kaitiaki list** or added in the review step.
 - A model can sometimes infer who someone is from context alone.
 - Once text reaches a provider, its own terms decide what happens to it.
 

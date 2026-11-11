@@ -11,11 +11,13 @@ pub mod commands;
 pub mod crypto;
 pub mod error;
 pub mod model;
+pub mod model_install;
 pub mod providers;
 pub mod redaction;
 pub mod sovereignty;
 pub mod state;
 pub mod store;
+pub mod student;
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -70,6 +72,9 @@ pub fn run() {
             commands::export_conversation,
             commands::audit_entries,
             commands::audit_verify,
+            commands::model_status,
+            commands::model_install,
+            commands::model_remove,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pātaka");

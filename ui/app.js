@@ -38,6 +38,7 @@ const state = {
   current: null, // ConversationView
   streaming: new Set(),
   lastActivity: Date.now(),
+  model: null, // ModelStatus
 };
 
 // ------------------------------------------------------------ utilities
@@ -72,6 +73,12 @@ async function attempt(fn) {
 
 function fmtTime(secs) {
   return new Date(secs * 1000).toLocaleString();
+}
+
+function foundBy(f) {
+  if (f.source === 'model') return `name model, ${Math.round(f.confidence * 100)}%`;
+  if (f.source === 'gazetteer') return f.detector === 'tapu_term' ? 'tapu list' : f.detector === 'korero_term' ? 'this kōrero' : 'kaitiaki list';
+  return `rule (${f.detector})`;
 }
 
 function catLabel(code) {
@@ -154,6 +161,7 @@ async function enterApp() {
   $('app').classList.remove('hidden');
   state.lastActivity = Date.now();
   state.settings = await call('get_settings');
+  state.model = await call('model_status');
   fillProviderSelect();
   await refreshList();
   if (state.list.length) await openKorero(state.list[0].id);
@@ -362,6 +370,14 @@ $('model-select').addEventListener('change', () => {
   attempt(() => call('set_last_selection', { providerId: $('provider-select').value, model: $('model-select').value }));
 });
 
+function modelActive() {
+  return !!(state.model && state.model.installed && state.settings?.kaupapa.useModel);
+}
+
+function detectorText() {
+  return modelActive() ? 'rules, your lists and the name model' : 'rules and your lists only; the name model is not on';
+}
+
 function updateRoute() {
   const p = currentProvider();
   const badge = $('destination');
@@ -379,7 +395,7 @@ function updateRoute() {
   const redact = trust !== 'device' || state.settings.kaupapa.redactOnDevice;
   if (blocked) note.textContent = 'This kōrero is tapu. Choose a model on this device or one you have marked sovereign.';
   else if (trust === 'device') note.textContent = redact ? 'Runs on this device; Tūmataiti still redacts (your setting).' : 'Runs on this device. Nothing leaves it.';
-  else note.textContent = `Tūmataiti redacts on this device before sending to ${p.name} (${p.jurisdiction}).`;
+  else note.textContent = `Tūmataiti redacts on this device (${detectorText()}) before sending to ${p.name} (${p.jurisdiction}).`;
 }
 
 // ------------------------------------------------------------ sending
@@ -408,7 +424,15 @@ async function submit() {
   const providerId = $('provider-select').value;
   const model = $('model-select').value;
   if (!model) throw new Error('Choose a model first (Settings → Providers can fetch the list).');
-  const preview = await call('preview_message', { id: state.current.id, text, providerId, model });
+  $('send').disabled = true;
+  $('route-note').textContent = 'Checking with Tūmataiti…';
+  let preview;
+  try {
+    preview = await call('preview_message', { id: state.current.id, text, providerId, model });
+  } finally {
+    updateRoute();
+    updateStreamingUi();
+  }
   let reviewed = false;
   if (preview.blocked || preview.needsReview) {
     const go = await review(text, providerId, model, preview);
@@ -446,6 +470,7 @@ function review(text, providerId, model, preview) {
         return el('tr', {},
           el('td', { text: f.text }),
           el('td', { text: catLabel(f.label === 'ID' ? 'OTHER_ID' : f.category) + (f.note ? ` — ${f.note}` : '') }),
+          el('td', { text: foundBy(f) }),
           el('td', { text: f.action }),
           el('td', { text: f.replacement ?? '(unchanged)' }),
           el('td', {}, canAllow ? el('button', {
@@ -459,8 +484,11 @@ function review(text, providerId, model, preview) {
             }),
           }) : null));
       });
-      $('review-findings').replaceChildren(...(rows.length ? rows : [el('tr', {}, el('td', { colspan: '5', class: 'muted', text: 'Nothing found by the rules or your lists.' }))]));
+      $('review-findings').replaceChildren(...(rows.length ? rows : [el('tr', {}, el('td', { colspan: '6', class: 'muted', text: pv.modelUsed ? 'Tūmataiti found nothing to redact.' : 'Nothing found by the rules or your lists.' }))]));
       $('review-send').disabled = pv.blocked;
+      $('review-hint').textContent = pv.modelUsed
+        ? 'Checked by the Tūmataiti rules, your kaitiaki lists and the name model. No detector catches everything: read the text above before sending.'
+        : 'Checked by the Tūmataiti rules and your kaitiaki lists. Names, places and whakapapa are only caught when they are on your lists or added here (install the name model in Settings → Tūmataiti to find them in context), so read the text above before sending.';
     };
     const focusSafe = (pv) => (pv.blocked ? dlg.querySelector('button[value=cancel]') : $('review-send')).focus();
     const refresh = async () => {
@@ -556,6 +584,7 @@ for (const tab of document.querySelectorAll('.tabs button')) {
 
 async function openSettings() {
   state.settings = await call('get_settings');
+  state.model = await call('model_status');
   renderSettings();
   $('settings').showModal();
 }
@@ -574,6 +603,8 @@ function renderSettings() {
   $('policy-threshold').value = s.kaupapa.policy.threshold;
   $('policy-review').value = s.kaupapa.review;
   $('policy-on-device').checked = s.kaupapa.redactOnDevice;
+  $('policy-use-model').checked = s.kaupapa.useModel;
+  renderModel();
   // Kaitiaki lists
   const byCat = (cat) => s.kaupapa.gazetteer.filter((t) => t.category === cat).map((t) => t.term).join('\n');
   $('kt-person').value = byCat('PERSON');
@@ -673,6 +704,56 @@ function providerCard(p) {
       }) }) : null));
 }
 
+function mb(bytes) {
+  return `${Math.round(bytes / 1e6)} MB`;
+}
+
+function renderModel() {
+  const m = state.model;
+  if (!m) return;
+  const status = $('model-status');
+  status.className = m.installed ? 'ok' : '';
+  if (!m.supported) {
+    status.textContent = 'ONNX Runtime has no build for this computer (for example Intel Macs), so the name model cannot run here. The rules and kaitiaki lists still work.';
+  } else if (m.installed) {
+    status.textContent = `Installed: ${m.name} (${m.precision}), ${m.runtime}. ${m.enabled ? 'In use.' : 'Switched off below.'}`;
+  } else {
+    status.textContent = `Not installed. Installing downloads about ${mb(m.downloadBytes)} once, from ${m.sources.join(' and ')}. Each file is checked against a SHA-256 built into Pātaka before it is used. No text is sent.`;
+  }
+  $('model-install').classList.toggle('hidden', !m.supported || m.installed);
+  $('model-install').disabled = m.installing;
+  $('model-remove').classList.toggle('hidden', !m.installed);
+}
+
+$('model-install').addEventListener('click', () => attempt(async () => {
+  $('model-install').disabled = true;
+  $('model-progress').textContent = 'Starting…';
+  try {
+    state.model = await call('model_install');
+    $('model-progress').textContent = 'Installed and checked.';
+    toast('The Tūmataiti name model is installed.');
+  } catch (e) {
+    $('model-progress').textContent = '';
+    throw e;
+  } finally {
+    state.model = await call('model_status');
+    renderModel();
+    updateRoute();
+  }
+}));
+
+$('model-remove').addEventListener('click', () => attempt(async () => {
+  if (!confirm('Remove the name model? Names will then only be caught by your kaitiaki lists.')) return;
+  state.model = await call('model_remove');
+  renderModel();
+  updateRoute();
+}));
+
+listen('model-progress', (ev) => {
+  const p = ev.payload;
+  $('model-progress').textContent = `Downloading ${p.stage}: ${mb(p.done)} of ${mb(p.total)}`;
+});
+
 $('add-provider').addEventListener('click', () => {
   $('provider-cards').append(providerCard({
     id: '', name: '', kind: 'openai_compatible', baseUrl: '', models: [], jurisdiction: '', trust: 'offshore',
@@ -686,6 +767,7 @@ $('save-policy').addEventListener('click', () => attempt(async () => {
   k.policy.threshold = Number($('policy-threshold').value);
   k.review = $('policy-review').value;
   k.redactOnDevice = $('policy-on-device').checked;
+  k.useModel = $('policy-use-model').checked;
   state.settings = await call('save_kaupapa', { kaupapa: k });
   toast('Tūmataiti policy saved.');
 }));

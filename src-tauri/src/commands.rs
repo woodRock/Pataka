@@ -2,7 +2,7 @@
 //! data key, and every network request goes through `send_message` (after
 //! redaction and the sovereignty check) or `fetch_models`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Notify;
-use tumataiti_rules::{Action, Category};
+use tumataiti_rules::{Action, Category, Span};
 use zeroize::Zeroizing;
 
 use crate::audit;
@@ -21,6 +21,7 @@ use crate::redaction::{self, Finding, Vault};
 use crate::sovereignty;
 use crate::state::{AppState, Session};
 use crate::store::KeyMode;
+use crate::{model_install, student};
 
 pub const DETECTOR: &str = "tumataiti-rules@ad7ac37";
 const MAX_MESSAGE_CHARS: usize = 200_000;
@@ -113,6 +114,8 @@ pub struct Preview {
     block_reasons: Vec<String>,
     history_findings: usize,
     needs_review: bool,
+    /// Whether the Tūmataiti name model checked this message.
+    model_used: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -200,7 +203,13 @@ struct Built {
 /// redacted again from its original text under the current kaupapa (so a
 /// term added later protects earlier turns too), and replies from on-device
 /// models are redacted as well, since they may echo real names.
-fn build_outbound(conv: &Conversation, text: &str, settings: &Settings, trust: Trust) -> Built {
+fn build_outbound(
+    conv: &Conversation,
+    text: &str,
+    settings: &Settings,
+    trust: Trust,
+    model: &ModelSpans,
+) -> Result<Built> {
     let k = &settings.kaupapa;
     let redact = trust != Trust::Device || k.redact_on_device;
     let mut vault = conv.vault.clone();
@@ -225,7 +234,7 @@ fn build_outbound(conv: &Conversation, text: &str, settings: &Settings, trust: T
         match m.role {
             Role::User => {
                 let content = if redact {
-                    let r = redaction::redact(&m.text, k, &conv.terms, &conv.allow, &mut vault);
+                    let r = redaction::redact(&m.text, k, &conv.terms, &conv.allow, model.get(&m.text)?, &mut vault);
                     history_findings += r.findings.len();
                     history_blocked |= r.blocked;
                     r.output
@@ -240,8 +249,8 @@ fn build_outbound(conv: &Conversation, text: &str, settings: &Settings, trust: T
                 }
                 let content = if !redact {
                     redaction::restore(&m.text, &vault)
-                } else if m.trust != Some(Trust::Offshore) && m.trust != Some(Trust::Sovereign) {
-                    let r = redaction::redact(&m.text, k, &conv.terms, &conv.allow, &mut vault);
+                } else if reply_needs_redaction(m) {
+                    let r = redaction::redact(&m.text, k, &conv.terms, &conv.allow, model.get(&m.text)?, &mut vault);
                     history_findings += r.findings.len();
                     history_blocked |= r.blocked;
                     r.output
@@ -254,7 +263,7 @@ fn build_outbound(conv: &Conversation, text: &str, settings: &Settings, trust: T
     }
 
     let new = if redact {
-        redaction::redact(text, k, &conv.terms, &conv.allow, &mut vault)
+        redaction::redact(text, k, &conv.terms, &conv.allow, model.get(text)?, &mut vault)
     } else {
         redaction::Outcome {
             output: text.to_string(),
@@ -263,19 +272,107 @@ fn build_outbound(conv: &Conversation, text: &str, settings: &Settings, trust: T
         }
     };
     push("user", new.output.clone(), &mut out);
-    Built {
+    Ok(Built {
         messages: out,
         new,
         vault,
         history_findings,
         history_blocked,
         redacted: redact,
+    })
+}
+
+/// Replies from models off the device only ever saw placeholders; replies
+/// from on-device models may contain real values, so they are redacted too.
+fn reply_needs_redaction(m: &Message) -> bool {
+    m.trust != Some(Trust::Offshore) && m.trust != Some(Trust::Sovereign)
+}
+
+/// The name model's spans for every text that will be redacted.
+#[derive(Default)]
+pub struct ModelSpans {
+    /// `None` when the model is off, not installed, or not needed.
+    map: Option<HashMap<String, Vec<Span>>>,
+}
+
+impl ModelSpans {
+    fn used(&self) -> bool {
+        self.map.is_some()
+    }
+
+    fn get(&self, text: &str) -> Result<&[Span]> {
+        match &self.map {
+            None => Ok(&[]),
+            Some(m) => m
+                .get(text)
+                .map(Vec::as_slice)
+                .ok_or_else(|| Error::Invalid("The kōrero changed while it was being checked. Send again.".into())),
+        }
     }
 }
 
-fn prepare(conv: &Conversation, text: &str, settings: &Settings, provider: &Provider, model: &str) -> (Preview, Built) {
+fn detector(model_used: bool) -> String {
+    if model_used {
+        format!("{DETECTOR} + {}", student::detector_name())
+    } else {
+        DETECTOR.to_string()
+    }
+}
+
+/// Run the name model (off the main thread) over every text that
+/// [`build_outbound`] will redact. Fails closed: if the model is switched on
+/// and installed but cannot run, nothing is sent.
+async fn model_spans_for(
+    app: &AppHandle,
+    conv: &Conversation,
+    text: &str,
+    settings: &Settings,
+    trust: Trust,
+) -> Result<ModelSpans> {
+    let k = &settings.kaupapa;
+    let redact = trust != Trust::Device || k.redact_on_device;
+    let root = app.state::<AppState>().store.root().to_path_buf();
+    if !redact || !k.use_model || !student::is_installed(&root) {
+        return Ok(ModelSpans::default());
+    }
+    let mut texts: Vec<String> = conv
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::User || reply_needs_redaction(m))
+        .map(|m| m.text.clone())
+        .collect();
+    texts.push(text.to_string());
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let model = st.student()?;
+        let mut map = HashMap::new();
+        for t in texts {
+            if let std::collections::hash_map::Entry::Vacant(slot) = map.entry(t) {
+                let spans = model.detect(slot.key()).map_err(|e| {
+                    Error::Invalid(format!(
+                        "{e} Turn the name model off in Settings → Tūmataiti to send with the rules only."
+                    ))
+                })?;
+                slot.insert(spans);
+            }
+        }
+        Ok(ModelSpans { map: Some(map) })
+    })
+    .await
+    .map_err(|_| Error::Invalid("the name model stopped unexpectedly".into()))?
+}
+
+fn prepare(
+    conv: &Conversation,
+    text: &str,
+    settings: &Settings,
+    provider: &Provider,
+    model: &str,
+    spans: &ModelSpans,
+) -> Result<(Preview, Built)> {
     let trust = sovereignty::effective_trust(provider);
-    let built = build_outbound(conv, text, settings, trust);
+    let built = build_outbound(conv, text, settings, trust, spans)?;
     let mut reasons = Vec::new();
     if let Err(e) = sovereignty::check_destination(conv.classification, provider) {
         reasons.push(e.to_string().trim_start_matches("Blocked: ").to_string());
@@ -322,8 +419,9 @@ fn prepare(conv: &Conversation, text: &str, settings: &Settings, provider: &Prov
         block_reasons: reasons,
         history_findings: built.history_findings,
         needs_review,
+        model_used: spans.used(),
     };
-    (preview, built)
+    Ok((preview, built))
 }
 
 fn check_text(text: &str) -> Result<()> {
@@ -426,8 +524,10 @@ pub async fn vault_unlock(state: State<'_, AppState>, passphrase: Option<String>
 #[tauri::command]
 pub fn vault_lock(state: State<'_, AppState>) -> Result<()> {
     state.cancel_all_streams();
-    // Dropping the session zeroes the data key and API keys.
+    // Dropping the session zeroes the data key and API keys; dropping the
+    // model forgets its cache of spans, which contain text from kōrero.
     *state.session() = None;
+    state.drop_student();
     Ok(())
 }
 
@@ -463,6 +563,8 @@ pub fn wipe_everything(state: State<'_, AppState>, confirm: String) -> Result<()
     }
     state.cancel_all_streams();
     *state.session() = None;
+    state.drop_student();
+    let _ = model_install::remove(state.store.root());
     state.store.wipe()
 }
 
@@ -822,8 +924,18 @@ pub fn delete_conversation(state: State<'_, AppState>, id: String) -> Result<()>
     Ok(())
 }
 
+/// Snapshot what detection needs, so the model can run without holding the lock.
+fn snapshot(state: &AppState, id: &str, provider_id: &str) -> Result<(Conversation, Settings, Provider)> {
+    state.with_session(|s| {
+        let c = state.store.load_conversation(&s.key, id)?;
+        let p = find_provider(&s.settings, provider_id)?.clone();
+        Ok((c, s.settings.clone(), p))
+    })
+}
+
 #[tauri::command]
-pub fn preview_message(
+pub async fn preview_message(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     text: String,
@@ -831,11 +943,9 @@ pub fn preview_message(
     model: String,
 ) -> Result<Preview> {
     check_text(&text)?;
-    state.with_session(|s| {
-        let c = state.store.load_conversation(&s.key, &id)?;
-        let p = find_provider(&s.settings, &provider_id)?;
-        Ok(prepare(&c, &text, &s.settings, p, &model).0)
-    })
+    let (c, settings, p) = snapshot(&state, &id, &provider_id)?;
+    let spans = model_spans_for(&app, &c, &text, &settings, sovereignty::effective_trust(&p)).await?;
+    Ok(prepare(&c, &text, &settings, &p, &model, &spans)?.0)
 }
 
 #[tauri::command]
@@ -847,7 +957,7 @@ pub fn cancel_reply(state: State<'_, AppState>, id: String) -> Result<()> {
 }
 
 #[tauri::command]
-pub fn send_message(
+pub async fn send_message(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
@@ -867,10 +977,19 @@ pub fn send_message(
         ));
     }
 
+    let (c0, settings0, p0) = snapshot(&state, &id, &provider_id)?;
+    let spans = model_spans_for(&app, &c0, &text, &settings0, sovereignty::effective_trust(&p0)).await?;
+    drop((c0, settings0, p0));
+    if state.streams().contains_key(&id) {
+        return Err(Error::Invalid(
+            "Wait for the current reply to finish, or stop it.".into(),
+        ));
+    }
+
     let (conv, provider, key, system, built, assistant_id) = state.with_session(|s| {
         let mut c = state.store.load_conversation(&s.key, &id)?;
         let p = find_provider(&s.settings, &provider_id)?.clone();
-        let (preview, built) = prepare(&c, &text, &s.settings, &p, &model);
+        let (preview, built) = prepare(&c, &text, &s.settings, &p, &model, &spans)?;
         let (cats, acts) = counts(&preview.findings);
         let mut entry = audit::Entry {
             korero: Some(c.id.clone()),
@@ -880,7 +999,7 @@ pub fn send_message(
             trust: Some(trust_name(preview.destination.trust).into()),
             classification: Some(format!("{:?}", c.classification).to_lowercase()),
             policy_hash: Some(policy_hash(&s.settings.kaupapa)),
-            detector: Some(DETECTOR.into()),
+            detector: Some(detector(spans.used())),
             categories: cats,
             actions: acts,
             ..Default::default()
@@ -1110,6 +1229,114 @@ pub async fn export_conversation(
     Ok(true)
 }
 
+// ---------------------------------------------------------------- name model
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelStatus {
+    /// ONNX Runtime publishes a build for this platform.
+    supported: bool,
+    installed: bool,
+    installing: bool,
+    enabled: bool,
+    name: &'static str,
+    precision: &'static str,
+    repo: &'static str,
+    revision: &'static str,
+    runtime: String,
+    download_bytes: u64,
+    sources: Vec<&'static str>,
+}
+
+fn model_status_view(state: &AppState, enabled: bool) -> ModelStatus {
+    ModelStatus {
+        supported: student::RUNTIME.is_some(),
+        installed: student::is_installed(state.store.root()),
+        installing: state.installing.load(std::sync::atomic::Ordering::SeqCst),
+        enabled,
+        name: student::MODEL_NAME,
+        precision: student::MODEL_PRECISION,
+        repo: student::MODEL_REPO,
+        revision: student::MODEL_REVISION,
+        runtime: format!("ONNX Runtime {}", student::ORT_VERSION),
+        download_bytes: model_install::download_size(),
+        sources: vec![
+            "huggingface.co (the model)",
+            "github.com (Microsoft's ONNX Runtime release)",
+        ],
+    }
+}
+
+#[tauri::command]
+pub fn model_status(state: State<'_, AppState>) -> Result<ModelStatus> {
+    let enabled = state.with_session(|s| Ok(s.settings.kaupapa.use_model))?;
+    Ok(model_status_view(&state, enabled))
+}
+
+#[tauri::command]
+pub async fn model_install(app: AppHandle, state: State<'_, AppState>) -> Result<ModelStatus> {
+    use std::sync::atomic::Ordering;
+    state.with_session(|_| Ok(()))?;
+    if state.installing.swap(true, Ordering::SeqCst) {
+        return Err(Error::Invalid("The name model is already being installed.".into()));
+    }
+    let root = state.store.root().to_path_buf();
+    let client = model_install::download_client();
+    let app2 = app.clone();
+    let last = std::sync::Mutex::new(Instant::now() - Duration::from_secs(1));
+    let progress = move |p: model_install::Progress| {
+        let mut l = last.lock().unwrap_or_else(|e| e.into_inner());
+        if l.elapsed() >= Duration::from_millis(150) || p.done == p.total {
+            *l = Instant::now();
+            let _ = app2.emit("model-progress", p);
+        }
+    };
+    let result = model_install::install(&client, &root, &progress).await;
+    state.installing.store(false, Ordering::SeqCst);
+    result?;
+    // Load once now, so a broken install is reported here rather than at send time.
+    let st = app.state::<AppState>();
+    st.drop_student();
+    let app3 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || app3.state::<AppState>().student().map(|_| ()))
+        .await
+        .map_err(|_| Error::Invalid("loading the name model failed".into()))??;
+    audit::append(
+        &state.store.audit_path(),
+        audit::Entry {
+            event: "model-installed".into(),
+            detector: Some(detector(true)),
+            detail: Some(format!(
+                "{}@{}, ONNX Runtime {}",
+                student::MODEL_REPO,
+                student::MODEL_REVISION,
+                student::ORT_VERSION
+            )),
+            ..Default::default()
+        },
+    )?;
+    let enabled = state.with_session(|s| Ok(s.settings.kaupapa.use_model))?;
+    Ok(model_status_view(&state, enabled))
+}
+
+#[tauri::command]
+pub fn model_remove(state: State<'_, AppState>) -> Result<ModelStatus> {
+    let enabled = state.with_session(|s| Ok(s.settings.kaupapa.use_model))?;
+    if state.installing.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(Error::Invalid("Wait for the installation to finish.".into()));
+    }
+    state.drop_student();
+    model_install::remove(state.store.root())?;
+    audit::append(
+        &state.store.audit_path(),
+        audit::Entry {
+            event: "model-removed".into(),
+            ..Default::default()
+        },
+    )?;
+    Ok(model_status_view(&state, enabled))
+}
+
 // ---------------------------------------------------------------- audit
 
 #[tauri::command]
@@ -1167,7 +1394,7 @@ mod tests {
             msg(Role::User, "Write to Aroha at aroha@example.nz", Some(Trust::Device)),
             msg(Role::Assistant, "Kia ora Aroha, ...", Some(Trust::Device)),
         ]);
-        let b = build_outbound(&c, "Shorter please", &settings, Trust::Offshore);
+        let b = build_outbound(&c, "Shorter please", &settings, Trust::Offshore, &ModelSpans::default()).unwrap();
         let all: String = b
             .messages
             .iter()
@@ -1187,7 +1414,7 @@ mod tests {
             msg(Role::Assistant, "Email [EMAIL_1]", Some(Trust::Offshore)),
         ]);
         c.vault.placeholders.insert("[EMAIL_1]".into(), "a@b.nz".into());
-        let b = build_outbound(&c, "thanks", &settings, Trust::Device);
+        let b = build_outbound(&c, "thanks", &settings, Trust::Device, &ModelSpans::default()).unwrap();
         assert_eq!(b.messages[1].content, "Email a@b.nz");
     }
 
@@ -1197,10 +1424,10 @@ mod tests {
         let mut c = conv(vec![]);
         c.classification = Classification::Tapu;
         let p = settings.providers.iter().find(|p| p.id == "anthropic").unwrap();
-        let (preview, _) = prepare(&c, "hello", &settings, p, "claude-opus-5-5");
+        let (preview, _) = prepare(&c, "hello", &settings, p, "claude-opus-5-5", &ModelSpans::default()).unwrap();
         assert!(preview.blocked);
         let local = settings.providers.iter().find(|p| p.id == "ollama").unwrap();
-        let (preview, _) = prepare(&c, "hello", &settings, local, "llama3.2");
+        let (preview, _) = prepare(&c, "hello", &settings, local, "llama3.2", &ModelSpans::default()).unwrap();
         assert!(!preview.blocked);
         assert!(!preview.leaves_device);
     }
