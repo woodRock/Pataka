@@ -39,6 +39,9 @@ const state = {
   streaming: new Set(),
   lastActivity: Date.now(),
   model: null, // ModelStatus
+  // Show real values in place of placeholders. A per-device display
+  // preference only; it holds no kōrero content.
+  reveal: (() => { try { return localStorage.getItem('pataka.reveal') === '1'; } catch { return false; } })(),
 };
 
 // ------------------------------------------------------------ utilities
@@ -99,6 +102,68 @@ function highlightPlaceholders(text) {
   frag.append(text.slice(last));
   return frag;
 }
+
+// Placeholders in the chat are shown as chips, so it stays clear what the
+// model actually received. Hovering or focusing a chip shows the other form
+// (the real value, or the placeholder when real values are shown); clicking
+// swaps that one chip. Real values come from the kōrero's own vault and never
+// leave the device.
+const PLACEHOLDER_RE = /\[(?:[A-Z_]+(?:_\d+)?|YEAR \d{4})\]/g;
+
+function placeholderChip(ph, original, reveal) {
+  const known = typeof original === 'string';
+  let showing = known && reveal;
+  const chip = el('button', { type: 'button', class: known ? 'ph' : 'ph masked' });
+  const paint = () => {
+    chip.textContent = showing ? original : ph;
+    chip.classList.toggle('revealed', showing);
+    const tip = !known
+      ? 'Replaced before sending. Pātaka keeps no copy of the original.'
+      : showing
+        ? `Kept on this device. The model saw ${ph}.`
+        : `${original}: shown here only. The model saw ${ph}.`;
+    chip.dataset.tip = tip;
+    chip.setAttribute('aria-label', known ? `${showing ? original : ph}. ${tip}` : `${ph}. ${tip}`);
+  };
+  if (known) chip.addEventListener('click', () => { showing = !showing; paint(); });
+  paint();
+  return chip;
+}
+
+function chipText(redactions) {
+  const map = redactions || {};
+  return (parent, text) => {
+    let last = 0;
+    PLACEHOLDER_RE.lastIndex = 0;
+    let m;
+    while ((m = PLACEHOLDER_RE.exec(text))) {
+      if (m.index > last) parent.append(text.slice(last, m.index));
+      const original = Object.prototype.hasOwnProperty.call(map, m[0]) ? map[m[0]] : undefined;
+      parent.append(placeholderChip(m[0], original, state.reveal));
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) parent.append(text.slice(last));
+  };
+}
+
+function countPlaceholders(text) {
+  return (text.match(PLACEHOLDER_RE) || []).length;
+}
+
+function updateRevealToggle() {
+  const c = state.current;
+  const b = $('reveal-toggle');
+  const any = !!c && c.messages.some((m) => countPlaceholders(m.role === 'user' ? (m.outbound || '') : (m.text || '')) > 0);
+  b.classList.toggle('hidden', !any);
+  b.textContent = state.reveal ? 'Show placeholders' : 'Show real values';
+  b.setAttribute('aria-pressed', String(state.reveal));
+}
+
+$('reveal-toggle').addEventListener('click', () => {
+  state.reveal = !state.reveal;
+  try { localStorage.setItem('pataka.reveal', state.reveal ? '1' : '0'); } catch { /* display preference only */ }
+  renderKorero();
+});
 
 // ------------------------------------------------------------ lock screen
 
@@ -234,6 +299,7 @@ function renderKorero() {
   for (const b of document.querySelectorAll('.class-toggle button')) b.classList.toggle('on', b.dataset.cls === c.classification);
   const box = $('messages');
   box.replaceChildren(...c.messages.map(renderMessage));
+  updateRevealToggle();
   box.scrollTop = box.scrollHeight;
   updateRoute();
   updateStreamingUi();
@@ -249,32 +315,38 @@ function routeMeta(m) {
 
 function renderMessage(m) {
   const wrap = el('div', { class: `msg ${m.role}`, 'data-id': m.id });
+  const put = chipText(state.current?.redactions);
   if (m.role === 'user') {
-    wrap.append(el('div', { class: 'bubble', text: m.display }));
+    // A redacted message is shown as it was sent, with placeholders as chips.
+    const sent = m.outbound !== null && m.outbound !== undefined && m.outbound !== m.text;
+    const bubble = el('div', { class: 'bubble' });
+    if (sent) put(bubble, m.outbound);
+    else bubble.textContent = m.display;
+    wrap.append(bubble);
     const meta = el('div', { class: 'meta' });
     if (m.trust) meta.append(el('span', { text: `→ ${routeMeta(m)} · ${TRUST_TEXT[m.trust] || m.trust}` }));
+    const n = sent ? countPlaceholders(m.outbound) : 0;
+    if (n) meta.append(el('span', { class: 'redacted-note', text: `${n} item${n === 1 ? '' : 's'} replaced before sending` }));
     wrap.append(meta);
-    if (m.outbound !== null && m.outbound !== undefined && m.outbound !== m.text) {
-      const pre = el('pre');
-      pre.append(highlightPlaceholders(m.outbound));
-      wrap.append(el('details', {}, el('summary', { text: 'What left your device' }), pre));
-    }
   } else {
     const bubble = el('div', { class: 'bubble' });
     const streaming = state.streaming.has(state.current?.id) && !m.text && !m.error && isLast(m);
-    if (m.display) bubble.append(renderMarkdown(m.display));
+    if (m.text) bubble.append(renderMarkdown(m.text, put));
     else if (streaming) bubble.append(el('span', { class: 'muted typing', text: 'Thinking' }));
     else if (!m.error) bubble.append(el('span', { class: 'muted', text: '(no reply)' }));
     wrap.append(bubble);
     if (m.notice) wrap.append(el('div', { class: 'notice', text: m.notice }));
     if (m.error) wrap.append(el('div', { class: 'err', text: m.error }));
     const meta = el('div', { class: 'meta' }, el('span', { text: routeMeta(m) }));
-    wrap.append(meta);
-    if (m.text && m.text !== m.display) {
-      const pre = el('pre');
-      pre.append(highlightPlaceholders(m.text));
-      wrap.append(el('details', {}, el('summary', { text: 'What the model returned (placeholders restored here, on your device)' }), pre));
+    if (countPlaceholders(m.text || '')) {
+      meta.append(el('span', {
+        class: 'redacted-note',
+        text: state.reveal
+          ? 'Highlighted values were placeholders in the reply, filled in on this device: hover one to see what the model saw'
+          : 'The model replied with placeholders: hover one to see who or what it stands for',
+      }));
     }
+    wrap.append(meta);
   }
   return wrap;
 }
@@ -300,6 +372,7 @@ listen('korero-stream', (ev) => {
   const m = state.current.messages.find((x) => x.id === p.messageId);
   if (m) {
     m.display = p.display;
+    m.text = p.raw;
     if (p.done) {
       m.error = p.error;
       m.notice = p.notice;
@@ -312,7 +385,7 @@ listen('korero-stream', (ev) => {
   }
   const node = document.querySelector(`.msg[data-id="${CSS.escape(p.messageId)}"] .bubble`);
   if (node) {
-    node.replaceChildren(renderMarkdown(p.display));
+    node.replaceChildren(renderMarkdown(p.raw, chipText(state.current.redactions)));
     const box = $('messages');
     if (box.scrollHeight - box.scrollTop - box.clientHeight < 200) box.scrollTop = box.scrollHeight;
   }

@@ -89,6 +89,9 @@ pub struct ConversationView {
     terms: Vec<Term>,
     allow: Vec<String>,
     placeholders: usize,
+    /// Placeholder → original value, so the window can show which parts of
+    /// a message were replaced before it left the device. Stays local.
+    redactions: BTreeMap<String, String>,
     streaming: bool,
 }
 
@@ -124,6 +127,8 @@ struct StreamPayload {
     korero: String,
     message_id: String,
     display: String,
+    /// The reply as the model wrote it, with placeholders.
+    raw: String,
     done: bool,
     error: Option<String>,
     notice: Option<String>,
@@ -151,6 +156,7 @@ fn view_conversation(c: &Conversation, streaming: bool) -> ConversationView {
         terms: c.terms.clone(),
         allow: c.allow.clone(),
         placeholders: c.vault.placeholders.len(),
+        redactions: c.vault.placeholders.clone(),
         streaming,
     }
 }
@@ -1069,7 +1075,7 @@ pub async fn send_message(
         let mut notices: Vec<String> = Vec::new();
         let mut last_emit = Instant::now() - Duration::from_secs(1);
         let emit = |app: &AppHandle,
-                    display: String,
+                    raw: &str,
                     done: bool,
                     error: Option<String>,
                     notice: Option<String>,
@@ -1079,7 +1085,8 @@ pub async fn send_message(
                 StreamPayload {
                     korero: id.clone(),
                     message_id: assistant_id.clone(),
-                    display,
+                    display: redaction::restore(raw, &vault),
+                    raw: raw.to_string(),
                     done,
                     error,
                     notice,
@@ -1096,7 +1103,7 @@ pub async fn send_message(
                     }
                     if last_emit.elapsed() >= Duration::from_millis(60) {
                         last_emit = Instant::now();
-                        emit(&app, redaction::restore(&raw, &vault), false, None, None, None);
+                        emit(&app, &raw, false, None, None, None);
                     }
                 }
                 StreamEvent::Model(m) => served = Some(m),
@@ -1149,7 +1156,7 @@ pub async fn send_message(
             c.updated_at = now();
             st.store.save_conversation(&s.key, &c)
         });
-        emit(&app, redaction::restore(&raw, &vault), true, error, notice, served);
+        emit(&app, &raw, true, error, notice, served);
     });
 
     Ok(view)

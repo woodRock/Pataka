@@ -214,6 +214,24 @@ dialog::backdrop { background: rgba(10, 20, 15, .55); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .dest { padding: 8px 12px; border-radius: 8px; background: var(--bg); }
 .outbound { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); padding: 12px; border-radius: 8px; max-height: 260px; overflow: auto; }
+/* Placeholder chips: what the model received, with the real value on hover. */
+.ph {
+  position: relative; display: inline; font: inherit; font-size: .92em; line-height: inherit;
+  padding: 0 5px; margin: 0 1px; border: 1px dashed var(--mark-ink); border-radius: 5px;
+  background: var(--mark); color: var(--mark-ink); cursor: pointer;
+}
+.ph.revealed { border-style: solid; font-family: inherit; }
+.ph:not(.revealed) { font-family: var(--mono); font-size: .85em; }
+.ph.masked { cursor: help; opacity: .85; }
+.ph:hover, .ph:focus-visible { border-color: var(--accent); }
+.ph:hover::after, .ph:focus-visible::after {
+  content: attr(data-tip); position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 10;
+  width: max-content; max-width: min(320px, 70vw); white-space: normal;
+  padding: 6px 9px; border-radius: 8px; background: var(--ink); color: var(--bg);
+  font: 12px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; pointer-events: none;
+}
+.msg .meta .redacted-note { color: var(--mark-ink); }
+
 mark { background: var(--mark); color: var(--mark-ink); border-radius: 3px; padding: 0 2px; }
 .blocked { background: var(--danger); color: #fff; padding: 10px 12px; border-radius: 8px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
