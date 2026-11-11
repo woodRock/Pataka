@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect x="32" y="32" width="960" height="960" rx="200" fill="#1f3d2b"/>
+  <!-- maihi (bargeboards) and roof -->
+  <path d="M512 196 L812 452 L760 452 L512 252 L264 452 L212 452 Z" fill="#e9dcc0"/>
+  <path d="M512 262 L742 452 L282 452 Z" fill="#b5502f"/>
+  <!-- storehouse body -->
+  <rect x="312" y="452" width="400" height="214" fill="#e9dcc0"/>
+  <rect x="470" y="512" width="84" height="154" rx="8" fill="#1f3d2b"/>
+  <!-- tekoteko at the apex -->
+  <circle cx="512" cy="176" r="30" fill="#e9dcc0"/>
+  <!-- raised on a post -->
+  <rect x="482" y="666" width="60" height="156" fill="#e9dcc0"/>
+  <rect x="384" y="822" width="256" height="34" rx="17" fill="#e9dcc0"/>
+</svg>

@@ -1,0 +1,48 @@
+[package]
+name = "pataka"
+version = "0.1.0"
+description = "Pātaka: a multi-model AI chat client grounded in Māori data sovereignty, with Tūmataiti local redaction"
+authors = ["Jesse Wood"]
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+name = "pataka_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2", "charset"] }
+url = "2"
+# Tūmataiti: local NZ PII rules, span merging and redaction policy. Pinned to a commit.
+tumataiti-rules = { git = "https://github.com/woodRock/tumataiti", rev = "ad7ac37fb56b48d2ccf2d71fcd6ec035b0ff97fc" }
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+argon2 = { version = "0.5", features = ["std", "zeroize"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = { version = "1", features = ["derive", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

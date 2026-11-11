@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pātaka</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <!-- Set up / unlock -->
+  <div id="lock" class="lock hidden">
+    <div class="lock-card">
+      <img src="icon.svg" alt="" class="lock-icon">
+      <h1>Pātaka</h1>
+      <p class="muted">Your kōrero stay on this device, encrypted. Tūmataiti redacts personal and sensitive details before anything reaches a cloud model.</p>
+
+      <form id="setup-form" class="hidden">
+        <h2>Kia ora — set up Pātaka</h2>
+        <p>Choose how to protect the key that encrypts your data.</p>
+        <label class="choice"><input type="radio" name="mode" value="passphrase" checked>
+          <span><strong>Passphrase</strong> (recommended). Asked each time Pātaka opens. Nobody, including other apps on this computer, can read your data without it. If you forget it, the data cannot be recovered.</span></label>
+        <label class="choice"><input type="radio" name="mode" value="keychain">
+          <span><strong>OS keychain</strong>. Unlocks automatically while you are signed in to this computer (macOS Keychain, Windows Credential Manager, or the Secret Service on Linux).</span></label>
+        <div id="setup-pass">
+          <label>Passphrase <input type="password" id="setup-pass1" autocomplete="new-password" minlength="12"></label>
+          <label>Again <input type="password" id="setup-pass2" autocomplete="new-password"></label>
+          <p class="hint">At least 12 characters. Four unrelated words work well.</p>
+        </div>
+        <button type="submit" class="primary">Set up</button>
+      </form>
+
+      <form id="unlock-form" class="hidden">
+        <label id="unlock-pass-label">Passphrase <input type="password" id="unlock-pass" autocomplete="current-password"></label>
+        <button type="submit" class="primary">Unlock</button>
+      </form>
+      <p id="lock-error" class="error" role="alert"></p>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="brand"><img src="icon.svg" alt=""><div><strong>Pātaka</strong><span>Tūmataiti · local redaction</span></div></div>
+      <div class="new-buttons">
+        <button id="new-noa" class="primary" title="General kōrero: any model, redacted before it leaves the device">+ Kōrero hou</button>
+        <button id="new-tapu" class="tapu-btn" title="Restricted kōrero: only on-device or sovereign models">+ Tapu</button>
+      </div>
+      <nav id="korero-list" class="korero-list" aria-label="Kōrero"></nav>
+      <div class="sidebar-foot">
+        <button id="open-settings">Settings</button>
+        <button id="lock-now">Lock</button>
+      </div>
+    </aside>
+
+    <main class="chat">
+      <header class="chat-head">
+        <div class="title-row">
+          <input id="korero-title" class="title-input" aria-label="Title" maxlength="120">
+          <div class="class-toggle" role="group" aria-label="Classification">
+            <button id="cls-noa" data-cls="noa" title="General: any model, with redaction">Noa</button>
+            <button id="cls-tapu" data-cls="tapu" title="Restricted: only on-device or sovereign models">Tapu</button>
+          </div>
+          <details class="menu">
+            <summary aria-label="More">⋯</summary>
+            <div class="menu-body">
+              <button id="korero-terms">Kōrero terms…</button>
+              <button id="export-md">Export as Markdown…</button>
+              <button id="export-json">Export as JSON…</button>
+              <button id="delete-korero" class="danger">Delete kōrero</button>
+            </div>
+          </details>
+        </div>
+        <div class="route-row">
+          <select id="provider-select" aria-label="Provider"></select>
+          <select id="model-select" aria-label="Model"></select>
+          <span id="destination" class="badge"></span>
+        </div>
+      </header>
+
+      <section id="messages" class="messages" aria-live="polite"></section>
+      <div id="empty" class="empty hidden">
+        <h2>Kia ora</h2>
+        <p>Start a kōrero. Before anything leaves this device, Tūmataiti finds NZ identifiers (IRD, NHI, bank accounts, cards, passports, licences), contact details, secrets and the names and places on your kaitiaki lists, and replaces them with placeholders. Replies are restored here, on your device.</p>
+        <p class="muted">Mark a kōrero <strong>Tapu</strong> to keep it to models on this device (for example Ollama) or on infrastructure you have marked sovereign.</p>
+      </div>
+
+      <form id="composer" class="composer">
+        <textarea id="input" rows="3" placeholder="Type a message. Enter to send, Shift+Enter for a new line." aria-label="Message"></textarea>
+        <div class="composer-row">
+          <span id="route-note" class="muted small"></span>
+          <button type="button" id="stop" class="hidden">Stop</button>
+          <button type="submit" id="send" class="primary">Send</button>
+        </div>
+      </form>
+    </main>
+  </div>
+
+  <!-- Review before sending -->
+  <dialog id="review" class="wide">
+    <form method="dialog" class="dialog-body">
+      <h2 id="review-title">Check what will leave your device</h2>
+      <p id="review-dest" class="dest"></p>
+      <div id="review-blocked" class="blocked hidden"></div>
+      <h3>What the model will see</h3>
+      <pre id="review-outbound" class="outbound"></pre>
+      <p id="review-history" class="muted small"></p>
+      <h3>What Tūmataiti found</h3>
+      <table class="findings"><thead><tr><th>Text (stays here)</th><th>Category</th><th>Action</th><th>Sent as</th><th></th></tr></thead><tbody id="review-findings"></tbody></table>
+      <div class="add-term">
+        <input id="review-term" placeholder="Something else to redact, e.g. a name or marae">
+        <select id="review-term-cat"></select>
+        <button type="button" id="review-add">Redact this too</button>
+      </div>
+      <p class="hint">Rules find structured identifiers. Names, places and whakapapa are only caught when they are on your kaitiaki lists or added here, so read the text above before sending.</p>
+      <div class="dialog-actions">
+        <button value="cancel">Cancel</button>
+        <button value="send" id="review-send" class="primary">Send</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Kōrero terms -->
+  <dialog id="terms-dialog">
+    <form method="dialog" class="dialog-body">
+      <h2>Terms for this kōrero</h2>
+      <p class="muted">Redacted or allowed in this kōrero only. Kaitiaki lists in Settings apply everywhere.</p>
+      <h3>Also redact</h3>
+      <ul id="terms-redact" class="term-list"></ul>
+      <h3>Allow unchanged</h3>
+      <ul id="terms-allow" class="term-list"></ul>
+      <div class="dialog-actions"><button value="close" class="primary">Done</button></div>
+    </form>
+  </dialog>
+
+  <!-- Settings -->
+  <dialog id="settings" class="wide">
+    <div class="dialog-body">
+      <div class="settings-head">
+        <h2>Settings</h2>
+        <button id="close-settings" aria-label="Close">✕</button>
+      </div>
+      <div class="tabs" role="tablist">
+        <button role="tab" data-tab="providers" class="active">Providers</button>
+        <button role="tab" data-tab="policy">Tūmataiti</button>
+        <button role="tab" data-tab="kaitiaki">Kaitiaki lists</button>
+        <button role="tab" data-tab="security">Security &amp; data</button>
+        <button role="tab" data-tab="audit">Audit log</button>
+        <button role="tab" data-tab="about">Mātāpono</button>
+      </div>
+
+      <section data-panel="providers" class="panel">
+        <p class="muted">Pātaka marks a provider <em>on this device</em> only when its address is this computer. Mark a remote provider <em>sovereign</em> only if you or your community control where it runs. Tapu kōrero may only use on-device and sovereign providers.</p>
+        <div id="provider-cards"></div>
+        <button id="add-provider">+ Add a provider</button>
+      </section>
+
+      <section data-panel="policy" class="panel hidden">
+        <p class="muted">What Tūmataiti does with each kind of information before it leaves this device. <strong>Pseudonymise</strong> uses a placeholder like [PERSON_1] that is restored in replies; <strong>mask</strong> removes it for good; <strong>block</strong> stops the message.</p>
+        <table class="policy-table"><thead><tr><th>Category</th><th>Action</th></tr></thead><tbody id="policy-rows"></tbody></table>
+        <label>Confidence threshold <input type="number" id="policy-threshold" min="0" max="1" step="0.05"></label>
+        <p class="hint">Detections below this are flagged for you instead of acted on.</p>
+        <label>Review before sending
+          <select id="policy-review">
+            <option value="always">Always, for anything leaving the device</option>
+            <option value="when_found">When Tūmataiti finds something</option>
+            <option value="never">Never (blocked messages are still stopped)</option>
+          </select></label>
+        <label class="check"><input type="checkbox" id="policy-on-device"> Also redact for models on this device</label>
+        <button id="save-policy" class="primary">Save</button>
+      </section>
+
+      <section data-panel="kaitiaki" class="panel hidden">
+        <p class="muted">Lists set by you or your kaitiaki (data steward). One per line. Matching ignores case and macrons (Hēmi = hemi) and only matches whole words.</p>
+        <div class="grid2">
+          <label>People's names <textarea id="kt-person" rows="6" placeholder="Hēmi Te Rangi&#10;Aunty Mere"></textarea></label>
+          <label>Affiliation: iwi, hapū, marae, whānau <textarea id="kt-affiliation" rows="6" placeholder="the marae, hapū or whānau names to keep local"></textarea></label>
+          <label>Places and addresses <textarea id="kt-address" rows="6"></textarea></label>
+          <label>Health terms <textarea id="kt-health" rows="6"></textarea></label>
+          <label>Tapu terms (block the message) <textarea id="kt-tapu" rows="6" placeholder="anything that must never leave the device"></textarea></label>
+          <label>Allow unchanged: tūpuna, public figures <textarea id="kt-allow" rows="6" placeholder="names that may be discussed openly in research"></textarea></label>
+        </div>
+        <button id="save-kaitiaki" class="primary">Save</button>
+      </section>
+
+      <section data-panel="security" class="panel hidden">
+        <h3>Encryption key</h3>
+        <p id="sec-mode" class="muted"></p>
+        <div class="row">
+          <input type="password" id="sec-pass1" placeholder="New passphrase" autocomplete="new-password">
+          <input type="password" id="sec-pass2" placeholder="Again" autocomplete="new-password">
+          <button id="sec-use-pass">Use this passphrase</button>
+          <button id="sec-use-keychain">Use OS keychain instead</button>
+        </div>
+        <h3>Locking and retention</h3>
+        <label>Lock after idle minutes (0 = never) <input type="number" id="sec-autolock" min="0" max="1440"></label>
+        <label>Delete kōrero not used for this many days (0 = keep until I delete them) <input type="number" id="sec-retention" min="0" max="3650"></label>
+        <h3>System prompt</h3>
+        <textarea id="sec-system" rows="3" placeholder="Optional instructions sent with every kōrero (redaction does not apply to this; keep personal details out of it)"></textarea>
+        <button id="save-general" class="primary">Save</button>
+        <h3>Your data</h3>
+        <p class="muted small">Stored encrypted in <code id="sec-dir"></code>. Nothing is synced or sent anywhere except the messages you choose to send.</p>
+        <div class="danger-zone">
+          <p><strong>Delete everything.</strong> Removes all kōrero, settings, API keys, the audit log and the key. This cannot be undone.</p>
+          <div class="row"><input id="wipe-confirm" placeholder="Type MUKU to confirm"><button id="wipe" class="danger">Delete everything</button></div>
+        </div>
+      </section>
+
+      <section data-panel="audit" class="panel hidden">
+        <p class="muted">A record of what kind of information left this device, where it went, and under which kaupapa. It holds counts only: never message text and never placeholder values. Each entry is chained to the one before by a SHA-256 hash, so changes are detectable.</p>
+        <div class="row"><button id="audit-verify">Verify chain</button><span id="audit-status" class="small"></span></div>
+        <div class="table-wrap"><table class="audit"><thead><tr><th>When</th><th>Event</th><th>Destination</th><th>Kōrero</th><th>Found</th><th>Kaupapa</th></tr></thead><tbody id="audit-rows"></tbody></table></div>
+      </section>
+
+      <section data-panel="about" class="panel hidden prose">
+        <h3>Ngā mātāpono: the principles behind Pātaka</h3>
+        <p>Pātaka is a storehouse. Taonga kept in a pātaka were raised up and protected, and what went in or out was decided by those responsible for it. This app tries to treat your data the same way. It draws on the <strong>Te Mana Raraunga</strong> principles of Māori data sovereignty and the <strong>CARE</strong> principles for Indigenous data governance.</p>
+        <ul>
+          <li><strong>Rangatiratanga (authority).</strong> You decide what leaves. Data is stored only on this device, encrypted, with no account, telemetry or sync. Tapu kōrero cannot be sent off the device.</li>
+          <li><strong>Whakapapa (provenance).</strong> Each message records which model and provider handled it, and where that provider processes data. You can see exactly what left the device.</li>
+          <li><strong>Whanaungatanga and kotahitanga (collective interests).</strong> Affiliation (iwi, hapū, marae, whānau) is treated as identifying, because in small communities it is. Kaitiaki lists let a community set what is protected.</li>
+          <li><strong>Manaakitanga (care).</strong> Tūmataiti redacts before sending, and the review step shows you the outbound text in full.</li>
+          <li><strong>Kaitiakitanga (guardianship).</strong> A tamper-evident audit log records what kinds of data went where, without storing the data itself. You can export or delete everything at any time.</li>
+        </ul>
+        <p class="muted">Redaction reduces risk; it does not remove it. Tūmataiti's rules find structured identifiers. Names, places and whakapapa are only caught when they are on a kaitiaki list. Decisions about mātauranga belong to the people it comes from: the tool flags, people decide.</p>
+        <p class="muted small">Detector: <code id="about-detector"></code>. Pātaka is open source under the Apache 2.0 licence.</p>
+      </section>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+</body>
+</html>
