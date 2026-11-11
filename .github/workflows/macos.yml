@@ -1,7 +1,7 @@
 # Builds the macOS app on a GitHub-hosted Mac, because Apple's toolchain only
 # runs on macOS. Linux and Windows are built locally (scripts/) and committed
-# to release/. GitHub-hosted runners, macOS included, are free for public
-# repositories, so this needs no billing.
+# to release/. GitHub-hosted runners are free for public repositories, but
+# GitHub will not start any job while the account has a billing lock.
 #
 # Run it from the Actions tab: "macOS build" → "Run workflow". With "publish"
 # ticked, it creates (or updates) the GitHub Release vX.Y.Z with the macOS

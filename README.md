@@ -21,17 +21,17 @@ See [docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md) for how this maps to the Te Mana 
 
 ## Install
 
-**[Download Pātaka from the latest release](https://github.com/woodRock/Pataka/releases/latest)**, which has the installers for every platform and their checksums.
+Download the installer for your platform. The links fetch the files committed in [`release/`](release/), with checksums in [`release/SHA256SUMS`](https://github.com/woodRock/Pataka/raw/main/release/SHA256SUMS).
 
-| Platform | Download | Also in this repo | Notes |
-|---|---|---|---|
-| macOS 13+ (Apple silicon and Intel) | [Pataka_0.2.0_universal.dmg](https://github.com/woodRock/Pataka/releases/latest/download/Pataka_0.2.0_universal.dmg) | (built by GitHub Actions) | Unsigned: right-click the app and choose *Open* the first time. |
-| Windows 10/11 | [Pataka_0.2.0_x64-setup.exe](https://github.com/woodRock/Pataka/releases/latest/download/Pataka_0.2.0_x64-setup.exe) | [release/windows/](release/windows/Pataka_0.2.0_x64-setup.exe) | Installs for the current user. Unsigned, so SmartScreen may warn: choose *More info → Run anyway*. |
-| Linux (Debian, Ubuntu) | [Pataka_0.2.0_amd64.deb](https://github.com/woodRock/Pataka/releases/latest/download/Pataka_0.2.0_amd64.deb) | [release/linux/](release/linux/Pataka_0.2.0_amd64.deb) | `sudo apt install ./Pataka_0.2.0_amd64.deb` |
-| Linux (Fedora, openSUSE) | [Pataka-0.2.0-1.x86_64.rpm](https://github.com/woodRock/Pataka/releases/latest/download/Pataka-0.2.0-1.x86_64.rpm) | [release/linux/](release/linux/Pataka-0.2.0-1.x86_64.rpm) | `sudo dnf install ./Pataka-0.2.0-1.x86_64.rpm` |
-| Linux (any) | [Pataka_0.2.0_amd64.AppImage](https://github.com/woodRock/Pataka/releases/latest/download/Pataka_0.2.0_amd64.AppImage) | [release/linux/](release/linux/Pataka_0.2.0_amd64.AppImage) | `chmod +x` it and run |
+| Platform | Download | Notes |
+|---|---|---|
+| Windows 10/11 | [Pataka_0.2.0_x64-setup.exe](https://github.com/woodRock/Pataka/raw/main/release/windows/Pataka_0.2.0_x64-setup.exe) | Installs for the current user. Unsigned, so SmartScreen may warn: choose *More info → Run anyway*. |
+| Linux (Debian, Ubuntu) | [Pataka_0.2.0_amd64.deb](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.2.0_amd64.deb) | `sudo apt install ./Pataka_0.2.0_amd64.deb` |
+| Linux (Fedora, openSUSE) | [Pataka-0.2.0-1.x86_64.rpm](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka-0.2.0-1.x86_64.rpm) | `sudo dnf install ./Pataka-0.2.0-1.x86_64.rpm` |
+| Linux (any) | [Pataka_0.2.0_amd64.AppImage](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.2.0_amd64.AppImage) | `chmod +x` it and run |
+| macOS 13+ (Apple silicon and Intel) | Not built yet: see below | Build it on a Mac with `scripts/build-macos.sh`, or with the *macOS build* workflow once GitHub Actions is available on the account. Unsigned: right-click the app and choose *Open* the first time. |
 
-Checksums: [SHA256SUMS](https://github.com/woodRock/Pataka/releases/latest/download/SHA256SUMS) (also [release/SHA256SUMS](release/SHA256SUMS)). Check a download before installing:
+Check a download before installing:
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing     # Linux
@@ -41,7 +41,7 @@ shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
 ### How the installers are built
 
 - **Linux and Windows** are built locally with `scripts/build-linux.sh` and `scripts/build-windows.sh`, then committed to [`release/`](release/).
-- **macOS** has to be built on a Mac, so it is built by the [macOS build](.github/workflows/macos.yml) workflow on a GitHub-hosted Mac. GitHub-hosted runners are free for public repositories, so no billing is needed. Run it from **Actions → macOS build → Run workflow**. With *publish* ticked, it creates the GitHub Release `v<version>` with the macOS `.dmg` and the Linux and Windows installers from `release/`, which is what the download links above point to. (GitHub only lists a workflow under Actions once it is on the default branch.)
+- **macOS** has to be built on a Mac. Either run `scripts/build-macos.sh` on a Mac and commit `release/macos/`, or use the [macOS build](.github/workflows/macos.yml) workflow (**Actions → macOS build → Run workflow**). With *publish* ticked, the workflow creates the GitHub Release `v<version>` with the macOS `.dmg` and the Linux and Windows installers from `release/`. GitHub Actions only runs while the account has no billing lock: a locked account cannot start jobs, even free ones on public repositories.
 
 ## Getting started
 
