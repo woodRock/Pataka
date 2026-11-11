@@ -9,7 +9,8 @@ rust-version = "1.92"
 
 [lib]
 name = "pataka_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop only: a cdylib would exceed the Windows DLL export limit (tokenizers).
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

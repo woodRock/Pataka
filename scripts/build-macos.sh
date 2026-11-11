@@ -16,7 +16,7 @@ npx tauri build --target universal-apple-darwin --bundles app,dmg
 out="$RELEASE/macos"
 rm -rf "$out" && mkdir -p "$out"
 b="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
-cp "$b"/dmg/*.dmg "$out"/
+cp "$b"/dmg/*_"$VERSION"_*.dmg "$out"/
 (cd "$b/macos" && ditto -c -k --keepParent Pataka.app "$out/Pataka_${VERSION}_universal.app.zip")
 "$ROOT/scripts/checksums.sh"
 log "done: $out"

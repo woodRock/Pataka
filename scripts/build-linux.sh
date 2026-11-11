@@ -11,7 +11,6 @@ npx tauri build --bundles deb,rpm,appimage
 out="$RELEASE/linux"
 rm -rf "$out" && mkdir -p "$out"
 b="$ROOT/src-tauri/target/release/bundle"
-cp "$b"/deb/*.deb "$b"/rpm/*.rpm "$out"/ 2>/dev/null || true
-cp "$b"/appimage/*.AppImage "$out"/ 2>/dev/null || true
+cp "$b"/deb/*_"$VERSION"_*.deb "$b"/rpm/*-"$VERSION"-*.rpm "$b"/appimage/*_"$VERSION"_*.AppImage "$out"/
 "$ROOT/scripts/checksums.sh"
 log "done: $out"

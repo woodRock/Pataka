@@ -21,21 +21,27 @@ See [docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md) for how this maps to the Te Mana 
 
 ## Install
 
-Installers are in the [`release/`](release/) folder of this repository, with checksums in `release/SHA256SUMS`. GitHub Actions is not used: everything is built locally with the scripts in `scripts/` and committed.
+**[Download Pātaka from the latest release](https://github.com/woodRock/Pataka/releases/latest)**, which has the installers for every platform and their checksums.
 
-| Platform | File | Notes |
-|---|---|---|
-| Linux (Debian, Ubuntu) | `release/linux/Pataka_*_amd64.deb` | `sudo apt install ./Pataka_*_amd64.deb` |
-| Linux (Fedora, openSUSE) | `release/linux/Pataka-*.x86_64.rpm` | `sudo dnf install ./Pataka-*.x86_64.rpm` |
-| Linux (any) | `release/linux/Pataka_*_amd64.AppImage` | `chmod +x` it and run |
-| Windows 10/11 | `release/windows/Pataka_*_x64-setup.exe` | Installs for the current user. Unsigned, so SmartScreen may warn: choose *More info → Run anyway*. |
-| macOS 13+ | build with `scripts/build-macos.sh` on a Mac | Apple only allows macOS apps to be built on a Mac; see below. |
+| Platform | Download | Also in this repo | Notes |
+|---|---|---|---|
+| macOS 13+ (Apple silicon and Intel) | [Pataka_0.2.0_universal.dmg](https://github.com/woodRock/Pataka/releases/latest/download/Pataka_0.2.0_universal.dmg) | (built by GitHub Actions) | Unsigned: right-click the app and choose *Open* the first time. |
+| Windows 10/11 | [Pataka_0.2.0_x64-setup.exe](https://github.com/woodRock/Pataka/releases/latest/download/Pataka_0.2.0_x64-setup.exe) | [release/windows/](release/windows/Pataka_0.2.0_x64-setup.exe) | Installs for the current user. Unsigned, so SmartScreen may warn: choose *More info → Run anyway*. |
+| Linux (Debian, Ubuntu) | [Pataka_0.2.0_amd64.deb](https://github.com/woodRock/Pataka/releases/latest/download/Pataka_0.2.0_amd64.deb) | [release/linux/](release/linux/Pataka_0.2.0_amd64.deb) | `sudo apt install ./Pataka_0.2.0_amd64.deb` |
+| Linux (Fedora, openSUSE) | [Pataka-0.2.0-1.x86_64.rpm](https://github.com/woodRock/Pataka/releases/latest/download/Pataka-0.2.0-1.x86_64.rpm) | [release/linux/](release/linux/Pataka-0.2.0-1.x86_64.rpm) | `sudo dnf install ./Pataka-0.2.0-1.x86_64.rpm` |
+| Linux (any) | [Pataka_0.2.0_amd64.AppImage](https://github.com/woodRock/Pataka/releases/latest/download/Pataka_0.2.0_amd64.AppImage) | [release/linux/](release/linux/Pataka_0.2.0_amd64.AppImage) | `chmod +x` it and run |
 
-Check a download before installing:
+Checksums: [SHA256SUMS](https://github.com/woodRock/Pataka/releases/latest/download/SHA256SUMS) (also [release/SHA256SUMS](release/SHA256SUMS)). Check a download before installing:
 
 ```bash
-cd release && sha256sum -c SHA256SUMS --ignore-missing
+sha256sum -c SHA256SUMS --ignore-missing     # Linux
+shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
 ```
+
+### How the installers are built
+
+- **Linux and Windows** are built locally with `scripts/build-linux.sh` and `scripts/build-windows.sh`, then committed to [`release/`](release/).
+- **macOS** has to be built on a Mac, so it is built by the [macOS build](.github/workflows/macos.yml) workflow on a GitHub-hosted Mac. GitHub-hosted runners are free for public repositories, so no billing is needed. Run it from **Actions → macOS build → Run workflow**. With *publish* ticked, it creates the GitHub Release `v<version>` with the macOS `.dmg` and the Linux and Windows installers from `release/`, which is what the download links above point to. (GitHub only lists a workflow under Actions once it is on the default branch.)
 
 ## Getting started
 
@@ -62,11 +68,11 @@ Release builds:
 | Linux .deb / .rpm / .AppImage | Linux | `scripts/build-linux.sh` |
 | Windows NSIS installer | Linux (cross-compiled) | `scripts/build-windows.sh` |
 | Windows NSIS + MSI | Windows | `powershell scripts/build-windows.ps1` |
-| macOS universal .dmg | macOS | `scripts/build-macos.sh` |
+| macOS universal .dmg | macOS, or GitHub Actions (*macOS build*) | `scripts/build-macos.sh` |
 
 Each script copies its output into `release/<platform>/` and refreshes `release/SHA256SUMS`. Commit the result to publish it. Linux build dependencies are listed at the top of `scripts/build-linux.sh`.
 
-Because there is no CI, run `scripts/install-hooks.sh` once. It adds a git pre-push hook that runs `scripts/check.sh` before every push.
+Linux and Windows have no CI, so run `scripts/install-hooks.sh` once. It adds a git pre-push hook that runs `scripts/check.sh` before every push. (The macOS workflow runs the same checks before it builds.)
 
 ## Layout
 
@@ -83,7 +89,8 @@ src-tauri/src/
   commands.rs      what the window may call
 ui/                window: index.html, styles.css, app.js, markdown.js (safe, DOM-only renderer)
 scripts/           build, checksum, check and hook scripts
-release/           committed installers and SHA256SUMS
+release/           committed Linux and Windows installers and SHA256SUMS
+.github/workflows/ macOS build on a GitHub-hosted Mac, publishes the GitHub Release
 ```
 
 ## Limits
