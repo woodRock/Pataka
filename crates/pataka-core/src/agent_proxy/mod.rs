@@ -37,6 +37,20 @@ pub trait Host: Send + Sync + 'static {
     fn audit_path(&self) -> std::path::PathBuf;
     /// Tell the person what happened (the app shows it; the CLI may ignore it).
     fn notify(&self, korero: &str, event: Value);
+    /// For a long-running proxy (`pataka serve`): whether it is locked.
+    fn status(&self) -> Value {
+        serde_json::json!({"locked": false})
+    }
+    /// Unlock a long-running proxy. Others cannot be unlocked from outside.
+    fn unlock(&self, _passphrase: &str) -> Result<()> {
+        Err(Error::Invalid(
+            "This proxy is unlocked by the program that started it.".into(),
+        ))
+    }
+    /// Lock a long-running proxy: it refuses model requests until unlocked.
+    fn lock(&self) -> Result<()> {
+        Err(Error::Invalid("This proxy cannot be locked from outside.".into()))
+    }
 }
 
 #[derive(Clone)]
@@ -62,7 +76,13 @@ pub struct Proxy {
 impl Proxy {
     /// Register a session; returns the base URL to give the agent.
     pub fn open(&self, session: Session) -> String {
-        let token = hex::encode(rand_token());
+        self.open_with_token(session, new_token())
+    }
+
+    /// Register a session under a token chosen by the caller (a long-running
+    /// proxy keeps one token, so the address in Claude Code's settings stays
+    /// valid across restarts).
+    pub fn open_with_token(&self, session: Session, token: String) -> String {
         self.sessions
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -81,16 +101,24 @@ impl Proxy {
     }
 }
 
-fn rand_token() -> [u8; 24] {
+/// A new unguessable session token (48 hex characters).
+pub fn new_token() -> String {
     use rand_core::{OsRng, RngCore};
     let mut b = [0u8; 24];
     OsRng.fill_bytes(&mut b);
-    b
+    hex::encode(b)
 }
 
 /// Start the proxy on a free port on 127.0.0.1.
 pub async fn start(host: Arc<dyn Host>) -> Result<Proxy> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    start_at(host, 0).await
+}
+
+/// Start the proxy on `port` on 127.0.0.1 (0 picks a free one).
+pub async fn start_at(host: Arc<dyn Host>, port: u16) -> Result<Proxy> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|e| Error::Invalid(format!("Could not listen on 127.0.0.1:{port}: {e}")))?;
     let port = listener.local_addr()?.port();
     let sessions = Arc::new(Mutex::new(HashMap::new()));
     let state = ProxyState {
@@ -153,6 +181,11 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
             .expect("response builds");
     }
 
+    // Controls for a long-running proxy. Never forwarded.
+    if let Some(action) = rest.strip_prefix("pataka/") {
+        return control(&st, &method, action, &body).await;
+    }
+
     let is_messages = rest == "v1/messages" || rest == "v1/messages/count_tokens";
     match (method.clone(), is_messages) {
         (Method::POST, true) => {}
@@ -212,6 +245,43 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
         None
     };
     forward(&st, method, &target, &headers, Some(json.to_string()), restore).await
+}
+
+fn json_response(status: StatusCode, v: Value) -> Response {
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Body::from(v.to_string()))
+        .expect("response builds")
+}
+
+async fn control(st: &ProxyState, method: &Method, action: &str, body: &Bytes) -> Response {
+    match (method.clone(), action) {
+        (Method::GET, "status") => json_response(StatusCode::OK, st.host.status()),
+        (Method::POST, "unlock") => {
+            let pass = zeroize::Zeroizing::new(
+                serde_json::from_slice::<Value>(body)
+                    .ok()
+                    .and_then(|v| v["passphrase"].as_str().map(String::from))
+                    .unwrap_or_default(),
+            );
+            let host = st.host.clone();
+            match tokio::task::spawn_blocking(move || host.unlock(&pass)).await {
+                Ok(Ok(())) => json_response(StatusCode::OK, st.host.status()),
+                Ok(Err(e)) => {
+                    // Slow down guessing.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": e.to_string()}))
+                }
+                Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Pātaka could not unlock."),
+            }
+        }
+        (Method::POST, "lock") => match st.host.lock() {
+            Ok(()) => json_response(StatusCode::OK, st.host.status()),
+            Err(e) => json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": e.to_string()})),
+        },
+        _ => error(StatusCode::NOT_FOUND, "Unknown Pātaka control."),
+    }
 }
 
 /// Why a typed prompt must not be sent at all: tapu terms, secrets, or

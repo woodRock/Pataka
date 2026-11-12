@@ -46,11 +46,42 @@ To point some other tool, or a Claude Code you start yourself, at the proxy:
 pataka proxy        # prints an ANTHROPIC_BASE_URL to use; Ctrl-C stops it
 ```
 
+## Every session, including the Claude desktop app
+
+`pataka claude` only covers the Claude Code you start with it. The Claude desktop app (its **Code** tab) starts Claude Code itself, so for that, and for a plain `claude`, run Pātaka as a service:
+
+```bash
+pataka service install     # asks first; unlock once if you use a passphrase
+pataka unlock              # after each login, if you use a passphrase
+```
+
+`pataka service install` does four things:
+
+- starts `pataka serve` at login (a launchd agent on macOS, a systemd user unit on Linux), listening on `127.0.0.1:47613` only, behind a secret path;
+- sets `ANTHROPIC_BASE_URL` and `PATAKA_HOOK_URL` in the `env` of `~/.claude/settings.json`, so every Claude Code session on this computer, in the terminal or the desktop app, sends its requests through the service;
+- switches off Claude Code's telemetry and error reports there (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`), because that traffic would not pass through Pātaka;
+- adds the hooks below, so typed prompts are checked against your whole kaupapa, including tapu terms.
+
+Restart the desktop app, or open a new session, to pick it up. With the service installed, plain `claude` is enough: `pataka claude` is not needed.
+
+It **fails closed**. While the service is locked, Claude Code shows *"Pātaka is locked, so nothing was sent"*. While it is stopped, Claude Code cannot connect and keeps retrying. Either way nothing leaves unredacted. If Claude Code seems stuck, check with `pataka service status`.
+
+```bash
+pataka service status      # running? unlocked? is Claude Code pointed at it?
+pataka lock                # refuse every request until `pataka unlock`
+pataka service stop        # or start
+pataka service uninstall   # puts Claude Code's settings back as they were
+```
+
+The placeholders for these sessions live in one kōrero, *Claude Code · all sessions*, so a name keeps the same placeholder across sessions and projects. If you already pointed Claude Code at a gateway with `ANTHROPIC_BASE_URL`, the service sends redacted requests on to it. Windows does not start the service at login yet: run `pataka serve` yourself, for example from Task Scheduler.
+
+The service does not cover the desktop app's **Chat** tab, which does not use Claude Code.
+
 ## Hooks
 
 `pataka hooks install` (or `pataka setup`, or the app's button) adds two hooks to `~/.claude/settings.json`. It asks first, keeps your other settings and hooks, and saves a backup of the file:
 
-- **Before a prompt is sent:** refuse it if it contains a term on your tapu list, or what looks like a password or API key. Under `pataka claude`, the running proxy checks the prompt against your kaupapa, so the hook never needs your passphrase. In a plain `claude` session, only the check for secrets applies.
+- **Before a prompt is sent:** refuse it if it contains a term on your tapu list, or what looks like a password or API key. Under `pataka claude` or the service, the running proxy checks the prompt against your kaupapa, so the hook never needs your passphrase. In a plain `claude` session, only the check for secrets applies.
 - **Before a tool runs** (optional): Claude Code asks you first before commands that can send data off the computer (`curl`, `wget`, `scp`, `ssh`, `nc`, `git push`, `gh`, publishing commands and the like), anything that reaches outside the project folder, web fetches and MCP tools, even if you have allowed that tool before.
 
 `pataka hooks uninstall` removes them.

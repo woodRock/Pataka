@@ -8,7 +8,7 @@ Built with Rust and [Tauri 2](https://tauri.app). The window is plain HTML, CSS 
 
 ## What it does
 
-- **Use it with Claude Code in the terminal.** `pataka claude` runs the real Claude Code with the Tūmataiti proxy in the middle: same Claude Code, same arguments, but only redacted text reaches Anthropic. See [Use Pātaka with Claude Code](#use-pātaka-with-claude-code).
+- **Use it with Claude Code in the terminal.** `pataka claude` runs the real Claude Code with the Tūmataiti proxy in the middle: same Claude Code, same arguments, but only redacted text reaches Anthropic. See [Use Pātaka with Claude Code](#use-pātaka-with-claude-code) To cover every session, including the Claude desktop app's Code tab, run it as a service: `pataka service install`.
 - **An agent in your project, like Claude Code or T3 Code.** Start **+ Agent in a folder** and the agent reads and edits files, runs commands and fixes bugs there, using Claude Code with your Claude subscription or Anthropic API key. Unlike running Claude Code directly, every request it makes to the model passes through a **Tūmataiti proxy on your computer**: your messages, file contents, command output and its own earlier tool calls are redacted first, and the placeholders are filled back in on your computer before any tool runs. You approve commands and file changes in Pātaka. Tapu content stops the request, and network and MCP tools never receive real values.
 - **Use your subscription, or an API key.** Like [T3 Code](https://github.com/pingdotgg/t3code), Pātaka can run the official Claude Code and Codex apps you are already signed in to, so a Claude Pro/Max or ChatGPT plan works without an API key. Pātaka never sees that login. It sends the apps only Tūmataiti-redacted text and runs them locked down for chat: Claude Code with no tools, MCP servers, settings or saved sessions, and Codex in a read-only sandbox that Pātaka stops if Codex tries to act on the computer.
 - **Local redaction with Tūmataiti, rules and model.** The Tūmataiti rules find IRD numbers (mod-11 checked), NHI numbers, bank accounts, payment cards (Luhn checked), passports and driver licences, NZ phone numbers, emails, URLs, IP addresses, labelled dates of birth or death, and API keys or passwords. The **Tūmataiti name model** (DeBERTa-v3-small, fine-tuned on NZ and te reo Māori text) finds people's names, addresses and affiliation (iwi, hapū, marae) in context. It runs natively on your device through ONNX Runtime. **Kaitiaki lists** that you or your data steward maintain add names, places and tapu terms. Everything is merged by Tūmataiti's own review and merge steps. Each item is pseudonymised (`[PERSON_1]`), generalised (`[YEAR 1984]`), masked (`[NZ_GOV_ID]`) or blocked, per a policy you control.
@@ -101,6 +101,8 @@ pataka claude         # in a project folder, instead of `claude`
 
 Claude Code works exactly as usual, and every argument passes through. Pātaka starts its Tūmataiti proxy on 127.0.0.1, behind a secret path, and points Claude Code at it with telemetry switched off. Every request is redacted on the way out (prompts, file contents, command output, Claude Code's own instructions), and placeholders are filled back in on the way back. Optional hooks refuse prompts containing tapu terms or secrets, and ask before commands that send data out (`curl`, `scp`, `git push`…) or reach outside the project. Lists, the name model and the audit log are managed from the terminal too (`pataka lists add-person "Hēmi Te Rangi"`, `pataka model install`, `pataka audit verify`), and are shared with the app.
 
+For every Claude Code session on the computer, including the ones the Claude desktop app starts, `pataka service install` runs the proxy at login and points Claude Code's settings at it. It fails closed: while the service is locked or stopped, nothing reaches Anthropic.
+
 Claude Code keeps its own transcripts in `~/.claude`, with real values, on your computer; only redacted text reaches Anthropic. Full details: [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md).
 
 ## Agents
@@ -131,7 +133,7 @@ Limits:
 crates/pataka-core/   the engine, shared by the app and the pataka command:
                       redaction, vault and store, kaupapa, name model, audit log,
                       guards, providers, and the agent proxy (agent_proxy/)
-crates/pataka-cli/    the pataka command (pataka claude, proxy, setup, lists, model, audit, hooks)
+crates/pataka-cli/    the pataka command (pataka claude, proxy, service, setup, lists, model, audit, hooks)
 install.sh, install.ps1  one-line installers for the pataka command
 src-tauri/src/
   redaction.rs     Tūmataiti rules + name model + kaitiaki lists, persistent placeholder vault, restore

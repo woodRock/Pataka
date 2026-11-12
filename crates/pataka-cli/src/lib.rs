@@ -7,6 +7,7 @@ mod claude;
 mod config;
 mod ctx;
 mod hooks;
+mod service;
 mod setup;
 
 use clap::{Parser, Subcommand};
@@ -35,6 +36,17 @@ enum Cmd {
     },
     /// Run only the proxy for this folder, and print the address to give Claude Code.
     Proxy,
+    /// The always-on proxy for every Claude Code session, including the Claude desktop app's.
+    Service {
+        #[command(subcommand)]
+        action: ServiceCmd,
+    },
+    /// Run the service in the foreground (what `pataka service install` starts at login).
+    Serve,
+    /// Unlock the running service with your passphrase (once after each login).
+    Unlock,
+    /// Lock the running service: Claude Code cannot reach the model until you unlock it.
+    Lock,
     /// Kaitiaki lists: names, places, affiliation, health and tapu terms.
     Lists {
         #[command(subcommand)]
@@ -60,6 +72,25 @@ enum Cmd {
     /// Called by Claude Code hooks.
     #[command(hide = true)]
     Hook { which: String },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Start the service at login and point every Claude Code session at it (asks first).
+    Install {
+        /// Local port to listen on (default 47613).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Stop the service and put Claude Code's settings back.
+    Uninstall,
+    /// Is it running, unlocked, and is Claude Code pointed at it?
+    Status,
+    Start,
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -124,6 +155,16 @@ pub fn run() -> i32 {
         Cmd::Setup => setup::setup(),
         Cmd::Claude { args } => claude::claude(args),
         Cmd::Proxy => claude::proxy(),
+        Cmd::Service { action } => match action {
+            ServiceCmd::Install { port, yes } => service::install(port, yes),
+            ServiceCmd::Uninstall => service::uninstall(),
+            ServiceCmd::Status => service::status(),
+            ServiceCmd::Start => service::start_stop(true),
+            ServiceCmd::Stop => service::start_stop(false),
+        },
+        Cmd::Serve => service::serve(),
+        Cmd::Unlock => service::unlock(),
+        Cmd::Lock => service::lock(),
         Cmd::Lists { action } => match action {
             ListsCmd::Show => config::lists_show(),
             ListsCmd::AddPerson { term } => config::lists_add(Person, &term),
