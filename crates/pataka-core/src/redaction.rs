@@ -154,17 +154,56 @@ pub fn detect(
         .collect();
     term_spans(text, &tapu, "tapu_term", &mut candidates);
 
-    let allowed: Vec<String> = kaupapa
+    let allowed = allowed(kaupapa, extra_allow);
+    let mut spans = tumataiti_rules::merge(text, candidates);
+    // A tapu span is never allowed through by an allow-list.
+    spans.retain(|s| s.category == Category::CulturalRestricted || !allowed.contains(&fold(s.text.trim())));
+    spans
+}
+
+/// The kaitiaki's allow-list and the caller's, folded for comparison.
+fn allowed(kaupapa: &Kaupapa, extra_allow: &[String]) -> Vec<String> {
+    kaupapa
         .allow_list
         .iter()
         .chain(extra_allow)
         .map(|a| fold(a.trim()))
         .filter(|a| !a.is_empty())
+        .collect()
+}
+
+/// Add spans for values this kōrero has already pseudonymised, but only where
+/// nothing was detected this time. The vault catches a value the detectors
+/// miss (a model reply that repeats a name), but it never overrides what they
+/// find now: a value once labelled PERSON must not keep beating the model's
+/// AFFILIATION, or the same text would be labelled differently depending on
+/// how old the kōrero is.
+fn fill_known(text: &str, kaupapa: &Kaupapa, extra_allow: &[String], vault: &Vault, spans: &mut Vec<Span>) {
+    let mut known = Vec::new();
+    term_spans(text, &known_terms(vault), "korero_term", &mut known);
+    if known.is_empty() {
+        return;
+    }
+    // Only a detection that will replace the text outranks the vault. A weak
+    // or allowed one would leave the value in the clear, where before it was
+    // hidden.
+    let policy = &kaupapa.policy;
+    let replaces = |s: &Span| {
+        s.category == Category::CulturalRestricted
+            || (s.confidence >= policy.threshold && !matches!(policy.action(s.category), Action::Allow | Action::Flag))
+    };
+    let overlaps = |a: &Span, b: &Span| a.start < b.end && b.start < a.end;
+    let allowed = allowed(kaupapa, extra_allow);
+    let gaps: Vec<Span> = tumataiti_rules::merge(text, known)
+        .into_iter()
+        .filter(|k| !spans.iter().any(|s| replaces(s) && overlaps(s, k)))
+        .filter(|k| !allowed.contains(&fold(k.text.trim())))
         .collect();
-    let mut spans = tumataiti_rules::merge(text, candidates);
-    // A tapu span is never allowed through by an allow-list.
-    spans.retain(|s| s.category == Category::CulturalRestricted || !allowed.contains(&fold(s.text.trim())));
-    spans
+    if !gaps.is_empty() {
+        spans.retain(|s| !gaps.iter().any(|k| overlaps(s, k)));
+        spans.extend(gaps);
+        spans.sort_by_key(|s| s.start);
+    }
 }
 
 /// The original values behind this kōrero's placeholders, as terms.
@@ -208,10 +247,10 @@ pub fn redact(
 ) -> Outcome {
     // Anything this kōrero has already pseudonymised is caught again wherever
     // it appears, even where no detector would find it this time (a model
-    // reply that repeats a name, a name in a different sentence).
-    let mut terms = extra_terms.to_vec();
-    terms.extend(known_terms(vault));
-    let mut spans = detect(text, kaupapa, &terms, extra_allow, model);
+    // reply that repeats a name, a name in a different sentence), but what is
+    // detected now decides the label.
+    let mut spans = detect(text, kaupapa, extra_terms, extra_allow, model);
+    fill_known(text, kaupapa, extra_allow, vault, &mut spans);
     // Placeholders already in the text (in a model's reply) stay as they are.
     let issued: Vec<(usize, usize)> = vault
         .placeholders
@@ -493,6 +532,48 @@ mod model_tests {
         let mut v = Vault::default();
         let o = redact(text, &Kaupapa::default(), &[], &[], &model, &mut v);
         assert_eq!(o.output, "Ask [PERSON_1] from [AFFILIATION_1].");
+    }
+
+    /// The first placeholder for `label`, built at run time.
+    fn ph(label: &str) -> String {
+        format!("[{label}_1]")
+    }
+
+    /// A vault where "Ōtaki" was once taken for a person.
+    fn vault_with_person() -> Vault {
+        let text = "Ko Ōtaki te kāinga.";
+        let model = [model_span(text, "Ōtaki", Category::Person, 0.9)];
+        let mut v = Vault::default();
+        assert_eq!(
+            redact(text, &Kaupapa::default(), &[], &[], &model, &mut v).output,
+            format!("Ko {} te kāinga.", ph("PERSON"))
+        );
+        v
+    }
+
+    #[test]
+    fn the_model_label_beats_an_old_vault_label() {
+        let mut v = vault_with_person();
+        let text = "E noho ana au ki Ōtaki.";
+        let model = [model_span(text, "Ōtaki", Category::Affiliation, 0.95)];
+        let o = redact(text, &Kaupapa::default(), &[], &[], &model, &mut v);
+        assert_eq!(o.output, format!("E noho ana au ki {}.", ph("AFFILIATION")));
+    }
+
+    #[test]
+    fn the_vault_still_catches_what_the_model_misses() {
+        let mut v = vault_with_person();
+        let o = redact("I haere au ki Ōtaki.", &Kaupapa::default(), &[], &[], &[], &mut v);
+        assert_eq!(o.output, format!("I haere au ki {}.", ph("PERSON")));
+    }
+
+    #[test]
+    fn a_weak_model_span_does_not_unhide_a_known_value() {
+        let mut v = vault_with_person();
+        let text = "I haere au ki Ōtaki.";
+        let model = [model_span(text, "Ōtaki", Category::Affiliation, 0.05)];
+        let o = redact(text, &Kaupapa::default(), &[], &[], &model, &mut v);
+        assert_eq!(o.output, format!("I haere au ki {}.", ph("PERSON")));
     }
 
     #[test]
