@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use mail_parser::{MessageParser, MimeHeaders};
 
-use super::imap::{self, astring, mailbox, uid_set, Fetched, Imap, Part};
+use super::imap::{self, astring, mailbox, uid_set, Fetched, Imap, Part, Tok};
 use super::{Account, Drafted, FlagChange, LabelChange, MailVault, Moved, Record};
 use crate::error::{Error, Result};
 
@@ -200,6 +200,58 @@ fn cut(s: &str, max: usize) -> (String, bool) {
         end -= 1;
     }
     (s[..end].to_string(), true)
+}
+
+/// The attachments in an IMAP `BODYSTRUCTURE`: (name, decoded size). A leaf
+/// counts when it has a file name, or is not text (inline images and the
+/// like); plain and HTML bodies are skipped.
+fn structure_attachments(t: &Tok, out: &mut Vec<(String, usize)>) {
+    let l = t.list();
+    // Multipart: the child parts come first, then the subtype.
+    if matches!(l.first(), Some(Tok::List(_))) {
+        for c in l.iter().take_while(|x| matches!(x, Tok::List(_))) {
+            structure_attachments(c, out);
+        }
+        return;
+    }
+    if l.len() < 7 {
+        return;
+    }
+    let lower = |i: usize| l[i].text().unwrap_or_default().to_ascii_lowercase();
+    let (ty, enc) = (lower(0), lower(5));
+    let param = |list: &Tok, key: &str| {
+        list.list().chunks(2).find_map(|p| match p {
+            [k, v] if k.text()?.eq_ignore_ascii_case(key) => v.text(),
+            _ => None,
+        })
+    };
+    // The disposition is the extension field shaped ("attachment" (params)).
+    let disp = l[7..].iter().find(|x| {
+        let d = x.list();
+        d.len() == 2 && matches!(d[0], Tok::Str(_)) && matches!(d[1], Tok::List(_) | Tok::Nil)
+    });
+    let name = disp
+        .and_then(|d| param(&d.list()[1], "FILENAME").or_else(|| param(&d.list()[1], "FILENAME*")))
+        .or_else(|| param(&l[2], "NAME"));
+    let attached = disp.is_some_and(|d| d.list()[0].text().is_some_and(|s| s.eq_ignore_ascii_case("attachment")));
+    if name.is_none() && !attached && (ty == "text" || ty == "multipart") {
+        return;
+    }
+    let octets: usize = l[6].text().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let size = if enc == "base64" { octets / 4 * 3 } else { octets };
+    let name = name.map(|n| decode_words(&n)).unwrap_or_else(|| "unnamed".into());
+    out.push((name, size));
+}
+
+/// Decode an RFC 2047 encoded name (`=?utf-8?B?...?=`); anything else as is.
+fn decode_words(s: &str) -> String {
+    if !s.contains("=?") {
+        return s.to_string();
+    }
+    MessageParser::default()
+        .parse(format!("Subject: {s}\r\n\r\n").as_bytes())
+        .and_then(|m| m.subject().map(str::to_string))
+        .unwrap_or_else(|| s.to_string())
 }
 
 fn size_text(n: usize) -> String {
@@ -610,9 +662,9 @@ impl Mailer {
     /// a message as read.
     fn full_items(&self) -> &'static str {
         if self.gmail {
-            "UID X-GM-MSGID X-GM-THRID X-GM-LABELS FLAGS BODY.PEEK[]"
+            "UID X-GM-MSGID X-GM-THRID X-GM-LABELS FLAGS RFC822.SIZE BODYSTRUCTURE BODY.PEEK[]<0.262144>"
         } else {
-            "UID FLAGS BODY.PEEK[]"
+            "UID FLAGS RFC822.SIZE BODYSTRUCTURE BODY.PEEK[]<0.262144>"
         }
     }
 
@@ -628,16 +680,30 @@ impl Mailer {
         if !cc.is_empty() {
             out.push_str(&format!("\ncc: {cc}"));
         }
-        let attachments: Vec<String> = m
-            .attachments()
-            .map(|a| {
-                format!(
-                    "{} ({})",
-                    a.attachment_name().unwrap_or("unnamed"),
-                    size_text(a.contents().len())
-                )
-            })
-            .collect();
+        // Only a prefix was fetched when the message is longer than what came
+        // down: its parsed attachments are cut off, so list them from the
+        // structure the server sent instead.
+        let whole = f.get("RFC822.SIZE").and_then(|t| t.text()?.parse::<usize>().ok());
+        let truncated = whole.is_some_and(|n| f.body().is_some_and(|b| b.len() < n));
+        let attachments: Vec<String> = match f.get("BODYSTRUCTURE") {
+            Some(bs) if truncated => {
+                let mut v = Vec::new();
+                structure_attachments(bs, &mut v);
+                v.into_iter()
+                    .map(|(name, n)| format!("{name} ({})", size_text(n)))
+                    .collect()
+            }
+            _ => m
+                .attachments()
+                .map(|a| {
+                    format!(
+                        "{} ({})",
+                        a.attachment_name().unwrap_or("unnamed"),
+                        size_text(a.contents().len())
+                    )
+                })
+                .collect(),
+        };
         if !attachments.is_empty() {
             out.push_str(&format!(
                 "\nattachments (names only; Pātaka never sends their content): {}",
@@ -1546,5 +1612,36 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "FROM \"aroha\" UNSEEN SINCE 31-Jan-2026 TEXT \"hui\"");
+    }
+}
+
+#[cfg(test)]
+mod structure_tests {
+    use super::{imap::tokenize, structure_attachments};
+    use mail_parser::MessageParser;
+
+    #[test]
+    fn attachments_come_from_the_structure() {
+        // A Gmail-style reply: text and HTML alternatives, an inline image,
+        // and a PDF attachment with an encoded name.
+        let bs = br#"(((("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "QUOTED-PRINTABLE" 1200 40 NIL NIL NIL)("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "QUOTED-PRINTABLE" 5000 90 NIL NIL NIL) "ALTERNATIVE" ("BOUNDARY" "b1") NIL NIL)("IMAGE" "PNG" ("NAME" "image001.png") "<i1>" NIL "BASE64" 4000 NIL ("inline" ("FILENAME" "image001.png")) NIL) "RELATED" ("BOUNDARY" "b2") NIL NIL)("APPLICATION" "PDF" ("NAME" "ChromaDCNN.pdf") NIL NIL "BASE64" 8000000 NIL ("attachment" ("FILENAME" "=?utf-8?B?Q2hyb21hRENOTi5wZGY=?=")) NIL) "MIXED" ("BOUNDARY" "b3") NIL NIL)"#;
+        let toks = tokenize(bs);
+        let mut out = Vec::new();
+        structure_attachments(&toks[0], &mut out);
+        assert_eq!(
+            out,
+            vec![("image001.png".to_string(), 3000), ("ChromaDCNN.pdf".to_string(), 6_000_000)]
+        );
+    }
+
+    #[test]
+    fn a_cut_message_still_has_its_text() {
+        let pdf = "QUJD".repeat(20_000);
+        let raw = format!(
+            "From: a@b\r\nSubject: s\r\nContent-Type: multipart/mixed; boundary=\"x\"\r\n\r\n--x\r\nContent-Type: text/plain\r\n\r\nKia ora, the revised draft is attached.\r\n--x\r\nContent-Type: application/pdf; name=\"p.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n--x--\r\n"
+        );
+        let cut = &raw.as_bytes()[..2000];
+        let m = MessageParser::default().parse(cut).unwrap();
+        assert!(m.body_text(0).unwrap().contains("revised draft is attached"));
     }
 }
