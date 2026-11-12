@@ -32,9 +32,7 @@ Download the installer for your platform. The links fetch the files committed in
 | Linux (Debian, Ubuntu) | [Pataka_0.5.0_amd64.deb](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.5.0_amd64.deb) | `sudo apt install ./Pataka_0.5.0_amd64.deb` |
 | Linux (Fedora, openSUSE) | [Pataka-0.5.0-1.x86_64.rpm](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka-0.5.0-1.x86_64.rpm) | `sudo dnf install ./Pataka-0.5.0-1.x86_64.rpm` |
 | Linux (any) | [Pataka_0.5.0_amd64.AppImage](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.5.0_amd64.AppImage) | `chmod +x` it and run |
-| macOS 13+ (Apple silicon and Intel) | [Pataka_0.4.0_universal.dmg](https://github.com/woodRock/Pataka/raw/main/release/macos/Pataka_0.4.0_universal.dmg) | Open the disk image and drag Pātaka to Applications. Not notarised: the first time, right-click the app and choose *Open* (on macOS 15+, use *System Settings → Privacy & Security → Open Anyway*). |
-
-The macOS download is still 0.4.0, which does not yet include the agent's Auto mode or the `pataka` command. To build 0.5.0 on a Mac, run `scripts/build-macos.sh` (it builds the app and `pataka` for both Apple silicon and Intel).
+| macOS 13+ (Apple silicon and Intel) | [Pataka_0.5.0_universal.dmg](https://github.com/woodRock/Pataka/raw/main/release/macos/Pataka_0.5.0_universal.dmg) | Open the disk image and drag Pātaka to Applications. Not notarised: the first time, right-click the app and choose *Open* (on macOS 15+, use *System Settings → Privacy & Security → Open Anyway*). |
 
 Check a download before installing:
 
