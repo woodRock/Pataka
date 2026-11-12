@@ -1021,6 +1021,30 @@ mod tests {
             .placeholders
             .contains_key("[EMAIL_1]"));
 
+        // The mod's endpoints: redact text, and restore tool arguments.
+        let v: Value = http
+            .post(format!("{base}/pataka/redact"))
+            .json(&json!({"texts": ["Write to hemi.te.rangi@example.co.nz", ""]}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["texts"][0], "Write to [EMAIL_1]");
+        assert_eq!(v["texts"][1], "");
+        let v: Value = http
+            .post(format!("{base}/pataka/restore"))
+            .json(&json!({"value": {"command": "mail [EMAIL_1]", "n": 3}}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["value"]["command"], "mail hemi.te.rangi@example.co.nz");
+        assert_eq!(v["value"]["n"], 3);
+
         // Locking again refuses requests and forgets the placeholders in memory.
         assert_eq!(
             http.post(format!("{base}/pataka/lock")).send().await.unwrap().status(),
@@ -1028,6 +1052,15 @@ mod tests {
         );
         assert_eq!(ask().send().await.unwrap().status(), 400);
         assert!(host.vault.lock().unwrap().placeholders.is_empty());
+        for action in ["redact", "restore"] {
+            let r = http
+                .post(format!("{base}/pataka/{action}"))
+                .json(&json!({"texts": ["x"], "value": "[EMAIL_1]"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 403, "{action} while locked");
+        }
 
         // Unknown controls are never forwarded upstream.
         *seen.lock().unwrap() = String::new();

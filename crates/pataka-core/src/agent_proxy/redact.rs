@@ -168,7 +168,7 @@ pub fn identity_terms() -> Vec<Term> {
 }
 
 impl Redactor<'_> {
-    fn text(&mut self, s: &str) -> String {
+    pub fn text(&mut self, s: &str) -> String {
         if s.trim().is_empty() {
             return s.to_string();
         }

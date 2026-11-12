@@ -183,7 +183,7 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
 
     // Controls for a long-running proxy. Never forwarded.
     if let Some(action) = rest.strip_prefix("pataka/") {
-        return control(&st, &method, action, &body).await;
+        return control(&st, &session, &method, action, &body).await;
     }
 
     let is_messages = rest == "v1/messages" || rest == "v1/messages/count_tokens";
@@ -255,7 +255,7 @@ fn json_response(status: StatusCode, v: Value) -> Response {
         .expect("response builds")
 }
 
-async fn control(st: &ProxyState, method: &Method, action: &str, body: &Bytes) -> Response {
+async fn control(st: &ProxyState, session: &Session, method: &Method, action: &str, body: &Bytes) -> Response {
     match (method.clone(), action) {
         (Method::GET, "status") => json_response(StatusCode::OK, st.host.status()),
         (Method::POST, "unlock") => {
@@ -280,8 +280,92 @@ async fn control(st: &ProxyState, method: &Method, action: &str, body: &Bytes) -
             Ok(()) => json_response(StatusCode::OK, st.host.status()),
             Err(e) => json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": e.to_string()})),
         },
+        // For a Claude Code mod: redact text before Claude Code stores or sends
+        // it, and put real values back into tool arguments before they run.
+        (Method::POST, "redact") => {
+            let Ok(v) = serde_json::from_slice::<Value>(body) else {
+                return error(StatusCode::BAD_REQUEST, "Pātaka could not read this request.");
+            };
+            let texts: Vec<String> = v["texts"]
+                .as_array()
+                .map(|a| a.iter().map(|t| t.as_str().unwrap_or_default().to_string()).collect())
+                .unwrap_or_default();
+            let host = st.host.clone();
+            let session = session.clone();
+            match tokio::task::spawn_blocking(move || redact_texts(host.as_ref(), &session, &texts)).await {
+                Ok(Ok((texts, stats, tapu))) => json_response(
+                    StatusCode::OK,
+                    serde_json::json!({"texts": texts, "categories": stats.categories, "tapu": tapu}),
+                ),
+                Ok(Err(e)) => json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": e.to_string()})),
+                Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Pātaka could not check this text."),
+            }
+        }
+        (Method::POST, "restore") => {
+            let Ok(mut v) = serde_json::from_slice::<Value>(body) else {
+                return error(StatusCode::BAD_REQUEST, "Pātaka could not read this request.");
+            };
+            if st.host.status()["locked"] == true {
+                return json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": "Pātaka is locked."}));
+            }
+            redact::restore_strings(
+                &mut v["value"],
+                &session.vault.lock().unwrap_or_else(|p| p.into_inner()),
+            );
+            json_response(StatusCode::OK, serde_json::json!({"value": v["value"]}))
+        }
         _ => error(StatusCode::NOT_FOUND, "Unknown Pātaka control."),
     }
+}
+
+/// Redact separate texts with the session's vault, as `redact_request` does
+/// for a whole request. Returns the texts, counts, and whether tapu content
+/// was found (its text comes back empty). Fails while Pātaka is locked.
+pub fn redact_texts(
+    host: &dyn Host,
+    session: &Session,
+    texts: &[String],
+) -> Result<(Vec<String>, redact::Stats, bool)> {
+    let (kaupapa, conv_terms, conv_allow) = host.context(&session.korero)?;
+    let k = redact::agent_kaupapa(&kaupapa);
+    let model = if kaupapa.use_model { host.model()? } else { None };
+    let detect = |t: &str| model.as_ref().and_then(|m| m.detect(t).ok()).unwrap_or_default();
+    let mut vault = session.vault.lock().unwrap_or_else(|p| p.into_inner());
+    let mut terms = conv_terms;
+    terms.extend(redact::identity_terms());
+    let mut allow = conv_allow;
+    allow.extend(redact::AGENT_ALLOW.iter().map(|s| s.to_string()));
+    let mut r = redact::Redactor {
+        kaupapa: &k,
+        terms: &terms,
+        allow: &allow,
+        model: &detect,
+        vault: &mut vault,
+        stats: redact::Stats::default(),
+        tapu: false,
+        use_model: true,
+    };
+    let out: Vec<String> = texts.iter().map(|t| r.text(t)).collect();
+    let (stats, tapu) = (r.stats, r.tapu);
+    let snapshot = vault.clone();
+    drop(vault);
+    host.save_vault(&session.korero, &snapshot)?;
+    if stats.categories.values().sum::<u32>() > 0 || tapu {
+        let _ = audit::append(
+            &host.audit_path(),
+            audit::Entry {
+                event: if tapu {
+                    "mod-blocked".into()
+                } else {
+                    "mod-redacted".into()
+                },
+                korero: Some(session.korero.clone()),
+                categories: stats.categories.clone(),
+                ..Default::default()
+            },
+        );
+    }
+    Ok((out, stats, tapu))
 }
 
 /// Why a typed prompt must not be sent at all: tapu terms, secrets, or
