@@ -14,6 +14,7 @@ cargo build --release --locked -p pataka-cli --target x86_64-apple-darwin
 mkdir -p "$ROOT/src-tauri/binaries"
 lipo -create -output "$ROOT/src-tauri/binaries/pataka-cli-universal-apple-darwin" \
   "$ROOT/target/aarch64-apple-darwin/release/pataka" "$ROOT/target/x86_64-apple-darwin/release/pataka"
+chmod 755 "$ROOT/src-tauri/binaries/pataka-cli-universal-apple-darwin"
 codesign --force --sign "${APPLE_SIGNING_IDENTITY:--}" "$ROOT/src-tauri/binaries/pataka-cli-universal-apple-darwin"
 log "building Pātaka $VERSION for macOS (universal)"
 # Without an Apple Developer ID, sign ad hoc so the app runs on this Mac.
@@ -28,5 +29,6 @@ cp "$b"/dmg/*_"$VERSION"_*.dmg "$out"/
 mkdir -p "$RELEASE/cli"
 rm -f "$RELEASE"/cli/pataka-*-universal-apple-darwin
 cp "$ROOT/src-tauri/binaries/pataka-cli-universal-apple-darwin" "$RELEASE/cli/pataka-$VERSION-universal-apple-darwin"
+chmod 755 "$RELEASE/cli/pataka-$VERSION-universal-apple-darwin"
 "$ROOT/scripts/checksums.sh"
 log "done: $out"

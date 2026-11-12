@@ -7,6 +7,7 @@ Installers are built locally with the scripts in `../scripts/` and committed her
 | `linux/` | `.deb`, `.rpm`, `.AppImage` (x86_64) | `scripts/build-linux.sh` |
 | `windows/` | NSIS `-setup.exe` installer (x86_64) | `scripts/build-windows.sh` (cross-compiled) or `scripts/build-windows.ps1` |
 | `macos/` | universal `.dmg` and zipped `.app` (Apple silicon + Intel) | `scripts/build-macos.sh`, or the *macOS build* workflow |
+| `cli/` | the `pataka` command on its own (Claude Code through Tūmataiti), fetched by `install.sh` / `install.ps1` | built by each platform's script above |
 
 Verify before installing:
 
