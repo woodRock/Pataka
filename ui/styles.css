@@ -94,14 +94,17 @@ label.check > input { width: auto; margin: 0; }
   background: radial-gradient(circle at 30% 20%, #2b5a3f, var(--sidebar));
 }
 .lock-card {
-  width: min(520px, 100%);
+  width: min(580px, 100%);
   background: var(--panel);
   border-radius: 16px;
   padding: 28px;
   box-shadow: 0 20px 60px rgba(0,0,0,.3);
 }
 .lock-card h1 { margin: 8px 0 4px; }
-.lock-icon { width: 64px; height: 64px; }
+.lock-icon { width: 48px; height: 48px; }
+#setup-pass:not(.hidden) { display: grid; grid-template-columns: 1fr 1fr; column-gap: 10px; }
+#setup-pass .hint { grid-column: 1 / -1; }
+.setup-model { margin-bottom: 14px; }
 .choice { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; }
 .choice input { width: auto; margin-top: 4px; }
 
@@ -170,6 +173,10 @@ label.check > input { width: auto; margin: 0; }
 }
 .menu-body button { border: none; text-align: left; }
 
+.model-banner { display: flex; gap: 10px; align-items: center; margin: 10px 20px 0; padding: 10px 12px;
+  border: 1px solid var(--mark-ink); border-radius: var(--radius); background: var(--mark); color: var(--mark-ink); font-size: 13px; }
+.model-banner span { flex: 1; }
+.model-banner button { flex: none; }
 .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
 .empty { flex: 1; padding: 40px; max-width: 720px; margin: 0 auto; }
 .msg { max-width: 860px; width: 100%; margin: 0 auto; }

@@ -60,7 +60,7 @@ shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
    - **On this device:** start [Ollama](https://ollama.com) or LM Studio first; Pātaka lists its models.
    - **Your subscription:** install [Claude Code](https://claude.com/claude-code) or [Codex](https://developers.openai.com/codex/cli) and sign in once in a terminal (`claude auth login` or `codex login`). Pātaka finds the app and checks you are signed in.
    - **API key:** paste a key. It is stored encrypted and never shown again.
-3. Open **Settings → Tūmataiti** and press **Install** under *Name model*. This is a one-time download of about 170 MB (250 MB on Windows): the model from Hugging Face and ONNX Runtime from Microsoft's GitHub release. Every file is checked against a SHA-256 built into Pātaka.
+3. The **name model** installs during setup unless you untick it (you can also install it later in **Settings → Tūmataiti**). This is a one-time download of about 170 MB (250 MB on Windows): the model from Hugging Face and ONNX Runtime from Microsoft's GitHub release. Every file is checked against a SHA-256 built into Pātaka.
 4. Open **Settings → Kaitiaki lists** and add the names, marae, hapū, places and tapu terms that should always be protected, whatever the model finds.
 5. Start a **Kōrero hou** (general) or a **Tapu** kōrero (on-device or sovereign models only).
 
@@ -151,7 +151,7 @@ More about the mod: [mods/tumataiti/README.md](mods/tumataiti/README.md).
 
 ### Optional: your email
 
-`pataka mail connect` lets Claude read and tidy your mailbox, with every email redacted before Claude sees it. It never sends or permanently deletes anything, and `pataka mail undo` reverses a change. See [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md#mail).
+In the app, **Settings → Mail** (or `pataka mail connect` in a terminal) lets Claude read and tidy your mailbox, with every email redacted before Claude sees it. It never sends or permanently deletes anything, and `pataka mail undo` reverses a change. See [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md#mail).
 
 ## Troubleshooting
 
