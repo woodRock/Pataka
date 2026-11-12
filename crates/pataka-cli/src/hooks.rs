@@ -110,9 +110,24 @@ pub fn hook_prompt() -> Result<i32> {
     Ok(0)
 }
 
+/// Permission modes in which the person has handed approvals to Claude Code
+/// (its auto-mode classifier, or no prompts at all). A hook "ask" would
+/// override that choice and prompt on every MCP tool, so the guard steps
+/// aside. Redaction is unaffected: it happens in the proxy, not here.
+const DEFERRING_MODES: [&str; 3] = ["auto", "bypassPermissions", "dontAsk"];
+
+fn defers_to_session(input: &Value) -> bool {
+    input["permission_mode"]
+        .as_str()
+        .is_some_and(|m| DEFERRING_MODES.contains(&m))
+}
+
 /// `pataka hook pretool`: Claude Code's PreToolUse hook.
 pub fn hook_pretool() -> Result<i32> {
     let input = stdin_json();
+    if defers_to_session(&input) {
+        return Ok(0);
+    }
     let tool = input["tool_name"].as_str().unwrap_or("");
     let cwd = input["cwd"]
         .as_str()
@@ -133,6 +148,15 @@ pub fn hook_pretool() -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_guard_steps_aside_in_auto_mode() {
+        assert!(defers_to_session(&json!({"permission_mode": "auto"})));
+        assert!(defers_to_session(&json!({"permission_mode": "bypassPermissions"})));
+        assert!(!defers_to_session(&json!({"permission_mode": "default"})));
+        assert!(!defers_to_session(&json!({"permission_mode": "acceptEdits"})));
+        assert!(!defers_to_session(&json!({})));
+    }
 
     #[test]
     fn secrets_are_refused_without_the_proxy() {

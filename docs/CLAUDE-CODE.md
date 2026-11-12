@@ -82,7 +82,7 @@ The service does not cover the desktop app's **Chat** tab, which does not use Cl
 `pataka hooks install` (or `pataka setup`, or the app's button) adds two hooks to `~/.claude/settings.json`. It asks first, keeps your other settings and hooks, and saves a backup of the file:
 
 - **Before a prompt is sent:** refuse it if it contains a term on your tapu list, or what looks like a password or API key. Under `pataka claude` or the service, the running proxy checks the prompt against your kaupapa, so the hook never needs your passphrase. In a plain `claude` session, only the check for secrets applies.
-- **Before a tool runs** (optional): Claude Code asks you first before commands that can send data off the computer (`curl`, `wget`, `scp`, `ssh`, `nc`, `git push`, `gh`, publishing commands and the like), anything that reaches outside the project folder, web fetches and MCP tools, even if you have allowed that tool before.
+- **Before a tool runs** (optional): Claude Code asks you first before commands that can send data off the computer (`curl`, `wget`, `scp`, `ssh`, `nc`, `git push`, `gh`, publishing commands and the like), anything that reaches outside the project folder, web fetches and MCP tools, even if you have allowed that tool before. In auto mode (and with permission prompts switched off) the tool guard steps aside and Claude Code's own auto-mode checks decide, so it does not prompt on every step. Redaction still applies: it happens in the proxy, not the hook.
 
 `pataka hooks uninstall` removes them.
 
