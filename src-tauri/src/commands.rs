@@ -1485,7 +1485,11 @@ mod tests {
     #[test]
     fn rules_only_always_asks_for_review() {
         let settings = Settings::default();
-        let p = settings.providers.iter().find(|p| p.id == "anthropic").unwrap();
+        let p = &providers::templates()
+            .into_iter()
+            .find(|t| t.id == "anthropic")
+            .unwrap()
+            .provider;
         let c = conv(vec![]);
         let (preview, _) = prepare(
             &c,
