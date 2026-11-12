@@ -102,16 +102,41 @@ pub struct Redactor<'a> {
 
 /// Names the agent's own instructions are full of, which a name model would
 /// otherwise take for people.
-pub const AGENT_ALLOW: [&str; 9] = [
+pub const AGENT_ALLOW: [&str; 34] = [
     "Claude",
     "Claude Code",
+    "Code",
     "Anthropic",
     "Opus",
     "Sonnet",
     "Haiku",
     "Fable",
+    "Mythos",
     "Pātaka",
     "Tūmataiti",
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "Grep",
+    "Glob",
+    "Task",
+    "Agent",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+    "NotebookEdit",
+    "Skill",
+    "Git",
+    "GitHub",
+    "Python",
+    "Node",
+    "Rust",
+    "Cargo",
+    "TypeScript",
+    "JavaScript",
+    "Markdown",
 ];
 
 /// Terms that identify the person through their computer: the account name

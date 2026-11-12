@@ -7,9 +7,18 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "pataka_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pataka"
 path = "src/main.rs"
+
+# The same program under the name the install scripts and docs use for the proxy.
+[[bin]]
+name = "pataka-proxy"
+path = "src/bin/pataka-proxy.rs"
 
 [dependencies]
 pataka-core.workspace = true
@@ -18,3 +27,12 @@ serde_json.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
 uuid.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+hex.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+
+[dev-dependencies]
+tempfile = "3"

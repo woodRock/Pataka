@@ -133,6 +133,26 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
     let target = format!("{}/{rest}{query}", session.upstream.trim_end_matches('/'));
 
+    // Claude Code's prompt hook asks here whether a typed prompt may go at all.
+    if method == Method::POST && rest == "pataka/check-prompt" {
+        let prompt = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|v| v["prompt"].as_str().map(String::from))
+            .unwrap_or_default();
+        let host = st.host.clone();
+        let korero = session.korero.clone();
+        let verdict = tokio::task::spawn_blocking(move || check_prompt(host.as_ref(), &korero, &prompt)).await;
+        let body = match verdict {
+            Ok(Ok(reasons)) => serde_json::json!({"block": !reasons.is_empty(), "reasons": reasons}),
+            Ok(Err(e)) => serde_json::json!({"block": true, "reasons": [e.to_string()]}),
+            Err(_) => serde_json::json!({"block": true, "reasons": ["Pātaka could not check this prompt"]}),
+        };
+        return Response::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("response builds");
+    }
+
     let is_messages = rest == "v1/messages" || rest == "v1/messages/count_tokens";
     match (method.clone(), is_messages) {
         (Method::POST, true) => {}
@@ -192,6 +212,39 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
         None
     };
     forward(&st, method, &target, &headers, Some(json.to_string()), restore).await
+}
+
+/// Why a typed prompt must not be sent at all: tapu terms, secrets, or
+/// anything else the kaupapa blocks. Empty when it may go (redacted).
+pub fn check_prompt(host: &dyn Host, korero: &str, prompt: &str) -> Result<Vec<String>> {
+    let (kaupapa, terms, allow) = host.context(korero)?;
+    let model = if kaupapa.use_model { host.model()? } else { None };
+    let spans = model.as_ref().and_then(|m| m.detect(prompt).ok()).unwrap_or_default();
+    let mut vault = Vault::default();
+    let out = crate::redaction::redact(prompt, &kaupapa, &terms, &allow, &spans, &mut vault);
+    let mut reasons: Vec<String> = out
+        .findings
+        .iter()
+        .filter(|f| f.action == tumataiti_rules::Action::Block)
+        .map(|f| match f.category {
+            tumataiti_rules::Category::CulturalRestricted => "it contains a term your kaupapa marks tapu".to_string(),
+            tumataiti_rules::Category::Secret => "it contains what looks like a password or API key".to_string(),
+            _ => format!("it contains {} data, which your kaupapa blocks", f.label),
+        })
+        .collect();
+    reasons.dedup();
+    if !reasons.is_empty() {
+        let _ = audit::append(
+            &host.audit_path(),
+            audit::Entry {
+                event: "prompt-blocked".into(),
+                korero: Some(korero.to_string()),
+                detail: Some(reasons.join("; ")),
+                ..Default::default()
+            },
+        );
+    }
+    Ok(reasons)
 }
 
 /// Redact a request in place with the kōrero's vault, the kaupapa and (if

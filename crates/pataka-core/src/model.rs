@@ -116,6 +116,15 @@ pub struct Kaupapa {
     pub use_model: bool,
 }
 
+impl Kaupapa {
+    /// A short fingerprint of the whole policy, recorded in the audit log.
+    pub fn hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        hex::encode(Sha256::digest(bytes))[..16].to_string()
+    }
+}
+
 impl Default for Kaupapa {
     fn default() -> Self {
         Kaupapa {

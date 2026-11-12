@@ -10,7 +10,9 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use tumataiti_rules::{Action, Category, Checksum, Source, Span};
+/// Re-exported so users of this crate need not depend on tumataiti-rules.
+pub use tumataiti_rules::{Action, Category};
+use tumataiti_rules::{Checksum, Source, Span};
 
 use crate::model::{Kaupapa, Term};
 
