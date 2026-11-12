@@ -176,15 +176,108 @@ fn addr_text(a: Option<&mail_parser::Address>) -> String {
         .join(", ")
 }
 
+/// The message's date in this computer's time zone, so every date in a
+/// listing is comparable, and agrees with what `after:` and `before:` mean.
 fn date_text(m: &mail_parser::Message) -> String {
+    use chrono::TimeZone;
     m.date()
-        .map(|d| {
-            format!(
+        .map(|d| match chrono::Local.timestamp_opt(d.to_timestamp(), 0).single() {
+            Some(t) => t.format("%Y-%m-%d %H:%M").to_string(),
+            None => format!(
                 "{:04}-{:02}-{:02} {:02}:{:02}",
                 d.year, d.month, d.day, d.hour, d.minute
-            )
+            ),
         })
         .unwrap_or_default()
+}
+
+/// Gmail reads `after:2026/11/02` as midnight Pacific time, so a message
+/// sent on the morning of 2 November in Aotearoa (still 1 November in
+/// California) is left out. Give Gmail local midnight in seconds instead,
+/// which it also accepts. Quoted text and everything else is unchanged.
+pub fn gmail_query(query: &str) -> String {
+    use chrono::TimeZone;
+    let date_word = |w: &str| -> Option<String> {
+        if w.contains('"') {
+            return None;
+        }
+        let body = w.trim_start_matches(['-', '(', '{']);
+        let prefix = &w[..w.len() - body.len()];
+        let core = body.trim_end_matches([')', '}']);
+        let suffix = &body[core.len()..];
+        let (key, value) = core.split_once(':')?;
+        if !["after", "before", "older", "newer"].contains(&key.to_lowercase().as_str()) {
+            return None;
+        }
+        let p: Vec<&str> = value.split(['/', '-']).collect();
+        let [y, m, d] = p[..] else {
+            return None;
+        };
+        let (y, m, d) = (y.parse().ok()?, m.parse().ok()?, d.parse().ok()?);
+        let midnight = chrono::Local.with_ymd_and_hms(y, m, d, 0, 0, 0).earliest()?;
+        Some(format!("{prefix}{key}:{}{suffix}", midnight.timestamp()))
+    };
+    let mut out = String::with_capacity(query.len() + 16);
+    let mut word = String::new();
+    let mut quoted = false;
+    let flush = |word: &mut String, out: &mut String| {
+        out.push_str(&date_word(word).unwrap_or_else(|| word.clone()));
+        word.clear();
+    };
+    for c in query.chars() {
+        if c == '"' {
+            quoted = !quoted;
+        }
+        if c.is_whitespace() && !quoted {
+            flush(&mut word, &mut out);
+            out.push(c);
+        } else {
+            word.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+/// A preview fetches only the start of a message, so a base64 body can
+/// arrive undecoded (its MIME part is cut off before the parser can finish
+/// it). Decode what is there, so the snippet is words rather than base64 the
+/// redactor would take for a secret. Anything else is returned unchanged.
+fn preview_text(s: &str) -> String {
+    use base64::Engine;
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let b64 = |w: &str| {
+        w.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    };
+    let looks_encoded = !words.is_empty()
+        && words.iter().all(|w| b64(w))
+        && words.iter().any(|w| w.len() >= 40)
+        && words.iter().map(|w| w.len()).sum::<usize>() >= 40;
+    if !looks_encoded {
+        return s.to_string();
+    }
+    let mut joined: String = words.concat().chars().filter(|&c| c != '=').collect();
+    joined.truncate(joined.len() - joined.len() % 4);
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(joined.as_bytes()) else {
+        return String::new();
+    };
+    let decoded = String::from_utf8_lossy(&bytes);
+    // An HTML body: keep the text between the tags.
+    let mut text = String::with_capacity(decoded.len());
+    let mut in_tag = false;
+    for c in decoded.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                text.push(' ');
+            }
+            c if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    squash(&text)
 }
 
 fn squash(s: &str) -> String {
@@ -537,11 +630,11 @@ impl Mailer {
         let (folder, uids) = if self.gmail {
             let all = self.all_mail();
             self.imap.open(&all, false).await?;
-            let q = query.trim();
+            let q = gmail_query(query.trim());
             let crit = if q.is_empty() {
                 vec![Part::Raw("ALL".into())]
             } else {
-                vec![Part::Raw("CHARSET UTF-8 X-GM-RAW ".into()), astring(q)]
+                vec![Part::Raw("CHARSET UTF-8 X-GM-RAW ".into()), astring(&q)]
             };
             (all, self.imap.search(crit).await?)
         } else {
@@ -611,7 +704,7 @@ impl Mailer {
                 addr_text(m.from()),
                 addr_text(m.to()),
                 m.subject().unwrap_or("").to_string(),
-                cut(&squash(&m.body_text(0).unwrap_or_default()), SNIPPET).0,
+                cut(&preview_text(&squash(&m.body_text(0).unwrap_or_default())), SNIPPET).0,
             ),
             None => Default::default(),
         };
@@ -1616,6 +1709,34 @@ mod tests {
 }
 
 #[cfg(test)]
+mod preview_tests {
+    use super::preview_text;
+    use base64::Engine;
+
+    #[test]
+    fn a_base64_body_is_decoded_for_the_snippet() {
+        let body = "<p>Kia ora, the hui is on Friday at the marae.</p> And more text follows here.";
+        let enc = base64::engine::general_purpose::STANDARD.encode(body);
+        // Wrapped at 76 like MIME, and cut off mid-way like a partial fetch.
+        let wrapped: Vec<String> = enc
+            .as_bytes()
+            .chunks(76)
+            .map(|c| String::from_utf8_lossy(c).into())
+            .collect();
+        let cut = &wrapped.join(" ")[..90];
+        let out = preview_text(cut);
+        assert!(out.starts_with("Kia ora, the hui is on Friday"), "{out}");
+        assert!(!out.contains('<'));
+    }
+
+    #[test]
+    fn ordinary_text_is_left_alone() {
+        let s = "Kia ora koutou, see you at the hui.";
+        assert_eq!(preview_text(s), s);
+    }
+}
+
+#[cfg(test)]
 mod structure_tests {
     use super::{imap::tokenize, structure_attachments};
     use mail_parser::MessageParser;
@@ -1630,7 +1751,10 @@ mod structure_tests {
         structure_attachments(&toks[0], &mut out);
         assert_eq!(
             out,
-            vec![("image001.png".to_string(), 3000), ("ChromaDCNN.pdf".to_string(), 6_000_000)]
+            vec![
+                ("image001.png".to_string(), 3000),
+                ("ChromaDCNN.pdf".to_string(), 6_000_000)
+            ]
         );
     }
 
@@ -1643,5 +1767,54 @@ mod structure_tests {
         let cut = &raw.as_bytes()[..2000];
         let m = MessageParser::default().parse(cut).unwrap();
         assert!(m.body_text(0).unwrap().contains("revised draft is attached"));
+    }
+}
+
+#[cfg(test)]
+mod gmail_date_tests {
+    use super::gmail_query;
+    use chrono::TimeZone;
+
+    fn midnight(y: i32, m: u32, d: u32) -> i64 {
+        chrono::Local
+            .with_ymd_and_hms(y, m, d, 0, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp()
+    }
+
+    #[test]
+    fn dates_become_local_midnight() {
+        let q = gmail_query("in:sent subject:\"Two drafts\" after:2026/11/02 before:2026-11-04");
+        assert_eq!(
+            q,
+            format!(
+                "in:sent subject:\"Two drafts\" after:{} before:{}",
+                midnight(2026, 11, 2),
+                midnight(2026, 11, 4)
+            )
+        );
+    }
+
+    #[test]
+    fn negation_brackets_and_case_are_kept() {
+        let q = gmail_query("-After:2026/1/5 (newer:2026/01/06)");
+        assert_eq!(
+            q,
+            format!("-After:{} (newer:{})", midnight(2026, 1, 5), midnight(2026, 1, 6))
+        );
+    }
+
+    #[test]
+    fn everything_else_is_unchanged() {
+        for q in [
+            "subject:\"after:2026/11/02\"",
+            "after:yesterday newer_than:2d",
+            "after:1794514834",
+            "from:someone is:unread",
+            "after:2026/13/40",
+        ] {
+            assert_eq!(gmail_query(q), q);
+        }
     }
 }

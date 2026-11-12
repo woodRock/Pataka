@@ -77,17 +77,49 @@ pub fn agent_kaupapa(k: &Kaupapa) -> Kaupapa {
 /// Is `start..end` part of a whitespace-delimited token that looks like code
 /// or a path rather than prose?
 pub fn in_code_token(text: &str, start: usize, end: usize) -> bool {
-    let ts = text[..start].rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
-    let te = text[end..]
+    // Whitespace can be more than one byte (a non-breaking space in an
+    // email), so step over the whole character, not one byte.
+    let ts = text[..start]
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return true;
+    }
+    let token_end = text[end..]
         .find(char::is_whitespace)
         .map(|i| end + i)
         .unwrap_or(text.len());
-    text[ts..te].chars().any(|c| {
+    let mut token = &text[ts..token_end];
+    // `Name<https://…>` (how Outlook writes links): the link is code, the
+    // name before it is prose.
+    if let Some(lt) = token.find('<') {
+        if ts + lt >= end {
+            token = &token[..lt];
+        }
+    }
+    let code = |c: char| {
         matches!(
             c,
             '/' | '\\' | '=' | '<' | '>' | '{' | '}' | '_' | '|' | '`' | '$' | '#' | '~'
         )
-    })
+    };
+    if !token.chars().any(code) {
+        return false;
+    }
+    // A list of names joined by slashes (`Aroha/Hemi/Mere`) is prose, not a
+    // path: every part is a capitalised word.
+    let words = token.trim_end_matches(['.', ',', ';', ':', ')', '!', '?']);
+    let words = words.trim_start_matches('(');
+    let prose_list = words.contains('/')
+        && !words.chars().any(|c| c != '/' && code(c))
+        && words.split('/').all(|w| {
+            w.chars().next().is_some_and(char::is_uppercase)
+                && w.chars().all(|c| c.is_alphabetic() || matches!(c, '-' | '\'' | '’'))
+        });
+    !prose_list
 }
 
 /// Detection for one string, so the name model can be plugged in.
@@ -734,5 +766,37 @@ mod tests {
         assert!(in_code_token(t, at("user_name"), at("user_name") + 4));
         assert!(!in_code_token(t, at("Aroha"), at("Aroha") + 5));
         assert!(!in_code_token(t, at("Ngata"), at("Ngata") + 5));
+    }
+}
+
+#[cfg(test)]
+mod code_token_tests {
+    use super::in_code_token;
+
+    fn check(text: &str, needle: &str) -> bool {
+        let start = text.find(needle).unwrap();
+        in_code_token(text, start, start + needle.len())
+    }
+
+    #[test]
+    fn a_non_breaking_space_does_not_panic() {
+        let text = "Hello\u{a0}Aroha, thanks";
+        assert!(!check(text, "Aroha"));
+        let text = "path\u{a0}src/Aroha.rs";
+        assert!(check(text, "Aroha"));
+    }
+
+    #[test]
+    fn a_slash_list_of_names_is_prose() {
+        assert!(!check("research with Aroha/Hemi/Mere on fish", "Hemi"));
+        assert!(!check("labs (Aroha/Hemi).", "Hemi"));
+        assert!(check("see crates/hemi/src", "hemi"));
+        assert!(check("/Users/Hemi/Desktop", "Hemi"));
+    }
+
+    #[test]
+    fn a_name_before_an_outlook_link_is_prose() {
+        assert!(!check("Homepage Aroha<https://example.org/a_b>", "Aroha"));
+        assert!(check("<https://example.org/Aroha>", "Aroha"));
     }
 }
