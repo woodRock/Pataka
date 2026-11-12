@@ -33,7 +33,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let dir = app.path().app_data_dir()?;
+            // The same folder as the `pataka` command, so `PATAKA_DATA_DIR`
+            // works for both (tests, demos and portable setups).
+            let dir = match pataka_core::paths::data_dir() {
+                Some(d) => d,
+                None => app.path().app_data_dir()?,
+            };
             let store = store::Store::new(dir)?;
             app.manage(state::AppState::new(store));
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))

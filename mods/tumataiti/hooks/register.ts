@@ -28,23 +28,14 @@ const LOCAL_TOOLS = new Set([
   'NotebookEdit', 'NotebookRead', 'Glob', 'Grep', 'LS',
 ])
 /**
- * Pātaka Mail's tools (`pataka claude` with a connected mailbox). They search
- * the person's own mail server, so they need real names too, but only in a
- * session `pataka claude` started with mail registered: it sets
- * PATAKA_MAIL_URL to its proxy on 127.0.0.1. Every other MCP tool keeps its
- * placeholders.
+ * Pātaka Mail's tools keep their placeholders: its server puts the real
+ * values back itself when the call arrives. Rewriting them here would change
+ * a call after Claude Code's auto mode reviewed it, and auto mode refuses to
+ * judge a call a hook changed. Every other MCP tool keeps its placeholders
+ * too.
  */
-const MAIL_TOOL = /^mcp__pataka-mail__[A-Za-z0-9_]+$/
-let mailSession: boolean | undefined
-
-async function restoresInput($: Dollar, tool: string): Promise<boolean> {
-  if (LOCAL_TOOLS.has(tool)) return true
-  if (!MAIL_TOOL.test(tool)) return false
-  if (mailSession === undefined) {
-    const url = (await $.env.get('PATAKA_MAIL_URL')) ?? ''
-    mailSession = url.startsWith('http://127.0.0.1:') && url.endsWith('/pataka/mcp')
-  }
-  return mailSession
+function restoresInput(tool: string): boolean {
+  return LOCAL_TOOLS.has(tool)
 }
 
 /** Keys of tool.call's input that are not the tool's own arguments. */
@@ -55,6 +46,8 @@ const PLACEHOLDER = /\[[A-Z][A-Z_]*_\d+\]/
 
 let base: string | undefined
 let redactedCount = 0
+/** Drawn reply text → the same text with real values, kept in memory only. */
+const restoredText = new Map<string, string>()
 
 async function serviceBase($: Dollar): Promise<string> {
   if (base) return base
@@ -173,11 +166,10 @@ export const register: Register = on => {
       : next({ ...e, message: { ...e.message, content: withheld(e.message.content as Block[]) } }),
   )
 
-  // Before a local tool runs, its arguments get the real values back, and so
-  // do Pātaka Mail's under `pataka claude`. Network and other MCP tools keep
-  // the placeholders.
+  // Before a local tool runs, its arguments get the real values back. Network
+  // and MCP tools keep the placeholders (Pātaka Mail restores its own).
   on('tool.call', async ($, e, next) => {
-    if (!(await restoresInput($, e.tool))) return next(e)
+    if (!restoresInput(e.tool)) return next(e)
     const args: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(e)) if (!RESERVED.has(k)) args[k] = v
     if (!PLACEHOLDER.test(JSON.stringify(args))) return next(e)
@@ -188,6 +180,25 @@ export const register: Register = on => {
       ? next(e)
       : { deny: `Pātaka could not put the real values back into this ${e.tool} call, so it did not run. ${LOCKED_HINT}` },
   )
+
+  // The model only ever writes placeholders, so its replies are stored with
+  // them (the `response` door is skipped above). Put the real values back in
+  // what the person sees: this rewrites the drawing alone, never the stored
+  // row, so the model still reads placeholders next turn. If Pātaka cannot
+  // restore (locked, not running), the reply is drawn as stored.
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    const text = e.props.text
+    if (!PLACEHOLDER.test(text)) return next(e)
+    let shown = restoredText.get(text)
+    if (shown === undefined) {
+      const { value } = await call<{ value: Json }>($, 'restore', { value: text })
+      if (typeof value !== 'string') return next(e)
+      shown = value
+      if (restoredText.size >= 500) restoredText.clear()
+      restoredText.set(text, shown)
+    }
+    return next({ ...e, props: { ...e.props, text: shown } })
+  }).catch(($, e, next) => next(e))
 
   on('session.start', async ($, e, next) => {
     const out = await next(e)

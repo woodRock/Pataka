@@ -619,10 +619,12 @@ async fn mail_end_to_end() {
     assert_eq!(seen.lock().unwrap().len(), 1, "{reply}");
     assert!(!seen.lock().unwrap()[0].contains("Wiremu"));
 
-    // 2. The search call comes back with the real name for this tool only.
+    // 2. The search call comes back with the placeholder, so Claude Code
+    // runs the input auto mode reviewed; the mail server restores it.
     let call = &reply["content"][0];
     assert_eq!(call["name"], "mcp__pataka-mail__search");
-    assert_eq!(call["input"]["query"], format!("from:\"{NAME}\""));
+    let query = call["input"]["query"].as_str().unwrap();
+    assert!(!query.contains(NAME) && query.contains("PERSON_"), "{query}");
     let (found, err) = mcp(&client, &base, "search", call["input"].clone()).await;
     assert!(!err, "{found}");
     assert!(found.contains(SUBJECT), "{found}");

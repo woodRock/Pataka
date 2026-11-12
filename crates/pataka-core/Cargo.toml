@@ -23,6 +23,8 @@ chacha20poly1305 = { version = "0.10", features = ["std"] }
 argon2 = { version = "0.5", features = ["std", "zeroize"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 thiserror = "2"
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-31"] }

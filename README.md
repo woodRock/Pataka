@@ -1,14 +1,193 @@
 # Pātaka
 
+**Talk to Claude and other AI models without handing over people's personal details.**
+
+Pātaka finds names, iwi and hapū, addresses, phone numbers, IRD and NHI numbers, and passwords in what you type, and swaps them for placeholders **on your computer** before anything goes to the AI. When the answer comes back, the real details are put back in, so you read a normal reply while the AI only ever saw placeholders.
+
+![Pātaka in use: a message with a name, an iwi and a phone number is redacted on the device before it is sent](docs/screenshots/redaction-demo.gif)
+
+## How it works
+
+| | |
+|---|---|
+| **You type** | Kia ora! Can you write a thank-you note to Mere Tawhiri from Ngāti Kahu? Her number is 021 555 0199. |
+| **The AI receives** | Kia ora! Can you write a thank-you note to [PERSON_1] from [AFFILIATION_1]? Her number is [PHONE_1]. |
+| **The AI replies** | Tēnā koe [PERSON_1], ngā mihi nui for everything you did for [AFFILIATION_1]… |
+| **You read** | Tēnā koe Mere Tawhiri, ngā mihi nui for everything you did for Ngāti Kahu… |
+
+The same person keeps the same placeholder for the whole conversation, the matching happens on your computer, and nothing is sent until you have had the chance to check it.
+
+## Which one do I need?
+
+Pātaka comes in three parts. Install the ones that match how you use AI.
+
+| You want to… | Install | Takes |
+|---|---|---|
+| Chat with Claude, ChatGPT or a model on your own computer, in a window | [The Pātaka app](#1-the-pātaka-app) | 5 minutes |
+| Use **Claude Code in a terminal** (`claude`) | [The `pataka` command](#2-claude-code-in-a-terminal) | 5 minutes |
+| Use the **Code tab of the Claude desktop app** | [The `pataka` command](#2-claude-code-in-a-terminal), then [the Tūmataiti mod](#3-the-claude-desktop-app) | 10 minutes |
+
+All three share one set of data on your computer: the same placeholders, the same lists of names to protect, and the same audit log.
+
+## 1. The Pātaka app
+
+### Download and install
+
+| Platform | Download | Notes |
+|---|---|---|
+| Windows 10/11 | [Pataka_0.5.0_x64-setup.exe](https://github.com/woodRock/Pataka/raw/main/release/windows/Pataka_0.5.0_x64-setup.exe) | Installs for the current user. Unsigned, so SmartScreen may warn: choose *More info → Run anyway*. |
+| Linux (Debian, Ubuntu) | [Pataka_0.5.0_amd64.deb](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.5.0_amd64.deb) | `sudo apt install ./Pataka_0.5.0_amd64.deb` |
+| Linux (Fedora, openSUSE) | [Pataka-0.5.0-1.x86_64.rpm](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka-0.5.0-1.x86_64.rpm) | `sudo dnf install ./Pataka-0.5.0-1.x86_64.rpm` |
+| Linux (any) | [Pataka_0.5.0_amd64.AppImage](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.5.0_amd64.AppImage) | `chmod +x` it and run |
+| macOS 13+ (Apple silicon and Intel) | [Pataka_0.5.0_universal.dmg](https://github.com/woodRock/Pataka/raw/main/release/macos/Pataka_0.5.0_universal.dmg) | Open the disk image and drag Pātaka to Applications. Not notarised: the first time, right-click the app and choose *Open* (on macOS 15+, use *System Settings → Privacy & Security → Open Anyway*). |
+
+<details>
+<summary>Check a download is genuine (optional)</summary>
+
+Download [`SHA256SUMS`](release/SHA256SUMS) into the same folder as the installer, then run:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing     # Linux
+shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
+```
+
+</details>
+
+### First run
+
+1. Open Pātaka and choose how to protect your data: a **passphrase** (recommended) or the **OS keychain**.
+2. Choose **Connect a model** (in **Settings → Providers**, or at the end of the model menu) and pick one:
+   - **On this device:** start [Ollama](https://ollama.com) or LM Studio first; Pātaka lists its models.
+   - **Your subscription:** install [Claude Code](https://claude.com/claude-code) or [Codex](https://developers.openai.com/codex/cli) and sign in once in a terminal (`claude auth login` or `codex login`). Pātaka finds the app and checks you are signed in.
+   - **API key:** paste a key. It is stored encrypted and never shown again.
+3. Open **Settings → Tūmataiti** and press **Install** under *Name model*. This is a one-time download of about 170 MB (250 MB on Windows): the model from Hugging Face and ONNX Runtime from Microsoft's GitHub release. Every file is checked against a SHA-256 built into Pātaka.
+4. Open **Settings → Kaitiaki lists** and add the names, marae, hapū, places and tapu terms that should always be protected, whatever the model finds.
+5. Start a **Kōrero hou** (general) or a **Tapu** kōrero (on-device or sovereign models only).
+
+Before you send, Pātaka shows you **exactly** what will leave your computer, with every placeholder highlighted. You can hide something it missed, or let a word through, right there.
+
+## 2. Claude Code in a terminal
+
+**Step 1. Install the `pataka` command.**
+
+On macOS or Linux, paste this into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/woodRock/Pataka/main/install.sh | sh     # macOS, Linux
+```
+
+On Windows, paste this into PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/woodRock/Pataka/main/install.ps1 | iex          # Windows
+```
+
+The installer checks the download against [`release/SHA256SUMS`](release/SHA256SUMS) and installs it for your user only, so you do not need an administrator password. (Already have the app? **Settings → Claude Code** installs the same command.)
+
+**Step 2. Set it up once.**
+
+```bash
+pataka setup
+```
+
+This asks how to protect your data (a passphrase is best), offers the Tūmataiti name model (about 170 MB, so names are caught in context), and finishes by checking that a test message really is redacted.
+
+**Step 3. Use `pataka claude` instead of `claude`.**
+
+```bash
+cd my-project
+pataka claude
+```
+
+That is it: Claude Code works exactly as before, with every argument passed through, but only redacted text reaches Anthropic.
+
+<details>
+<summary>Protect plain <code>claude</code> in every terminal too</summary>
+
+```bash
+pataka service install   # runs the Pātaka service at login
+pataka unlock            # once after each login, if you chose a passphrase
+```
+
+The service is what the Claude desktop app mod uses as well. It fails closed: while it is locked or stopped, nothing reaches Anthropic. `pataka service uninstall` puts everything back.
+
+</details>
+
+<details>
+<summary>How it works</summary>
+
+Claude Code works exactly as usual, and every argument passes through. Pātaka starts its Tūmataiti proxy on 127.0.0.1, behind a secret path, and points Claude Code at it with telemetry switched off. Every request is redacted on the way out (prompts, file contents, command output, Claude Code's own instructions), and placeholders are filled back in on the way back. Optional hooks refuse prompts containing tapu terms or secrets, and ask before commands that send data out (`curl`, `scp`, `git push`…) or reach outside the project. Lists, the name model and the audit log are managed from the terminal too (`pataka lists add-person "Hēmi Te Rangi"`, `pataka model install`, `pataka audit verify`), and are shared with the app.
+
+Full details: [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md).
+
+</details>
+
+## 3. The Claude desktop app
+
+The Claude desktop app talks to Anthropic directly, so it needs the **Tūmataiti mod** instead of the proxy. The mod redacts what you type and everything Claude reads (files, command output) inside the app's **Code** tab, and puts the real values back for tools that run on your computer.
+
+**Step 1.** Install the `pataka` command and the service, and unlock it ([section 2](#2-claude-code-in-a-terminal)):
+
+```bash
+pataka setup
+pataka service install
+pataka unlock
+```
+
+**Step 2.** Add the mod. In a terminal:
+
+```bash
+claude plugin marketplace add woodRock/Pataka
+claude plugin install tumataiti@pataka
+```
+
+**Step 3.** Quit and reopen the Claude desktop app, then start a new session in the **Code** tab.
+
+To update later: `claude plugin marketplace update pataka`, then `claude plugin update tumataiti@pataka`. To remove it: `claude plugin uninstall tumataiti@pataka`.
+
+> The mod covers the **Code** tab only. The desktop app's **Chat** tab does not run Claude Code, so nothing there is redacted.
+
+More about the mod: [mods/tumataiti/README.md](mods/tumataiti/README.md).
+
+### Optional: your email
+
+`pataka mail connect` lets Claude read and tidy your mailbox, with every email redacted before Claude sees it. It never sends or permanently deletes anything, and `pataka mail undo` reverses a change. See [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md#mail).
+
+## Troubleshooting
+
+<details>
+<summary>macOS says the app "cannot be opened"</summary>
+
+Pātaka is not notarised by Apple yet. Right-click the app and choose **Open**. On macOS 15 or later, open **System Settings → Privacy & Security** and choose **Open Anyway**.
+
+</details>
+
+<details>
+<summary>Claude Code says "Pātaka is locked"</summary>
+
+Run `pataka unlock` and enter your passphrase. You need to do this once after each login.
+
+</details>
+
+<details>
+<summary>How do I check what was really sent?</summary>
+
+Every message in the app shows what left your device. For Claude Code, see [Check what was sent](docs/CLAUDE-CODE.md#check-what-was-sent): it writes every request, after redaction, to a file you can search for a name you expect to be hidden.
+
+</details>
+
+<details>
+<summary>Names are not being caught</summary>
+
+Install the name model: **Settings → Tūmataiti → Install** in the app, or `pataka model install`. Without it, only the names on your kaitiaki lists are caught. Add people, marae, hapū and places that must always be hidden with **Settings → Kaitiaki lists**, or `pataka lists add-person "Name"`.
+
+</details>
+
+## What Pātaka does
+
 A desktop AI chat client for macOS, Windows and Linux, grounded in Māori data sovereignty. Talk to Claude, ChatGPT, DeepSeek, Qwen, Mistral or a model running on your own computer (Ollama, LM Studio), with an API key or with the Claude or ChatGPT subscription you already have. Before anything reaches a cloud model, [Tūmataiti](https://github.com/woodRock/tumataiti) redacts personal and culturally sensitive details **on your device**. Replies are restored locally, so you read a natural answer while the provider only ever sees placeholders.
 
-Built with Rust and [Tauri 2](https://tauri.app). The window is plain HTML, CSS and JavaScript with no runtime npm dependencies.
-
-![The review step: what Tūmataiti found, and exactly what will leave the device](docs/screenshots/review.png)
-
-## What it does
-
-- **Use it with Claude Code in the terminal.** `pataka claude` runs the real Claude Code with the Tūmataiti proxy in the middle: same Claude Code, same arguments, but only redacted text reaches Anthropic. See [Use Pātaka with Claude Code](#use-pātaka-with-claude-code) To cover a plain `claude` in any terminal as well, run it as a service: `pataka service install`. (The Claude desktop app is not covered: it sets its own model address.)
+- **Use it with Claude Code in the terminal.** `pataka claude` runs the real Claude Code with the Tūmataiti proxy in the middle: same Claude Code, same arguments, but only redacted text reaches Anthropic. See [Use Pātaka with Claude Code](#2-claude-code-in-a-terminal) To cover a plain `claude` in any terminal as well, run it as a service: `pataka service install`. (The Claude desktop app is not covered: it sets its own model address.)
 - **An agent in your project, like Claude Code or T3 Code.** Start **+ Agent in a folder** and the agent reads and edits files, runs commands and fixes bugs there, using Claude Code with your Claude subscription or Anthropic API key. Unlike running Claude Code directly, every request it makes to the model passes through a **Tūmataiti proxy on your computer**: your messages, file contents, command output and its own earlier tool calls are redacted first, and the placeholders are filled back in on your computer before any tool runs. You approve commands and file changes in Pātaka. Tapu content stops the request, and network and MCP tools never receive real values.
 - **Use your subscription, or an API key.** Like [T3 Code](https://github.com/pingdotgg/t3code), Pātaka can run the official Claude Code and Codex apps you are already signed in to, so a Claude Pro/Max or ChatGPT plan works without an API key. Pātaka never sees that login. It sends the apps only Tūmataiti-redacted text and runs them locked down for chat: Claude Code with no tools, MCP servers, settings or saved sessions, and Codex in a read-only sandbox that Pātaka stops if Codex tries to act on the computer.
 - **Local redaction with Tūmataiti, rules and model.** The Tūmataiti rules find IRD numbers (mod-11 checked), NHI numbers, bank accounts, payment cards (Luhn checked), passports and driver licences, NZ phone numbers, emails, URLs, IP addresses, labelled dates of birth or death, and API keys or passwords. The **Tūmataiti name model** (DeBERTa-v3-small, fine-tuned on NZ and te reo Māori text) finds people's names, addresses and affiliation (iwi, hapū, marae) in context. It runs natively on your device through ONNX Runtime. **Kaitiaki lists** that you or your data steward maintain add names, places and tapu terms. Everything is merged by Tūmataiti's own review and merge steps. Each item is pseudonymised (`[PERSON_1]`), generalised (`[YEAR 1984]`), masked (`[NZ_GOV_ID]`) or blocked, per a policy you control.
@@ -22,54 +201,21 @@ Built with Rust and [Tauri 2](https://tauri.app). The window is plain HTML, CSS 
 
 See [docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md) for how this maps to the Te Mana Raraunga and CARE principles, and [SECURITY.md](SECURITY.md) for the security design and threat model.
 
-## Install
+## Limits
 
-Download the installer for your platform. The links fetch the files committed in [`release/`](release/), with checksums in [`release/SHA256SUMS`](https://github.com/woodRock/Pataka/raw/main/release/SHA256SUMS).
+Redaction reduces risk; it does not remove it.
 
-| Platform | Download | Notes |
-|---|---|---|
-| Windows 10/11 | [Pataka_0.5.0_x64-setup.exe](https://github.com/woodRock/Pataka/raw/main/release/windows/Pataka_0.5.0_x64-setup.exe) | Installs for the current user. Unsigned, so SmartScreen may warn: choose *More info → Run anyway*. |
-| Linux (Debian, Ubuntu) | [Pataka_0.5.0_amd64.deb](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.5.0_amd64.deb) | `sudo apt install ./Pataka_0.5.0_amd64.deb` |
-| Linux (Fedora, openSUSE) | [Pataka-0.5.0-1.x86_64.rpm](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka-0.5.0-1.x86_64.rpm) | `sudo dnf install ./Pataka-0.5.0-1.x86_64.rpm` |
-| Linux (any) | [Pataka_0.5.0_amd64.AppImage](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.5.0_amd64.AppImage) | `chmod +x` it and run |
-| macOS 13+ (Apple silicon and Intel) | [Pataka_0.5.0_universal.dmg](https://github.com/woodRock/Pataka/raw/main/release/macos/Pataka_0.5.0_universal.dmg) | Open the disk image and drag Pātaka to Applications. Not notarised: the first time, right-click the app and choose *Open* (on macOS 15+, use *System Settings → Privacy & Security → Open Anyway*). |
+- No detector catches everything. Tūmataiti's own evaluation finds that rules plus a student model still miss personal information in some held-out NZ documents (see its [results](https://github.com/woodRock/tumataiti/tree/main/ml/results)). Always read the outbound text in the review step.
+- Without the name model installed (or on Intel Macs, which ONNX Runtime 1.31 has no build for), **names, addresses and whakapapa are only caught if they are on a kaitiaki list** or added in the review step.
+- A model can sometimes infer who someone is from context alone.
+- Once text reaches a provider, its own terms decide what happens to it.
 
-Check a download before installing:
+## For developers
 
-```bash
-sha256sum -c SHA256SUMS --ignore-missing     # Linux
-shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
-```
+Built with Rust and [Tauri 2](https://tauri.app). The window is plain HTML, CSS and JavaScript with no runtime npm dependencies.
 
-### Just the `pataka` command (Claude Code in the terminal)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/woodRock/Pataka/main/install.sh | sh     # macOS, Linux
-```
-
-```powershell
-irm https://raw.githubusercontent.com/woodRock/Pataka/main/install.ps1 | iex          # Windows
-```
-
-These download `pataka` from [`release/cli/`](release/cli/), check its SHA-256 against `release/SHA256SUMS`, and install it for your user only. The app installs the same command from **Settings → Claude Code**.
-
-### How the installers are built
-
-- **Linux and Windows** are built locally with `scripts/build-linux.sh` and `scripts/build-windows.sh`, then committed to [`release/`](release/).
-- **macOS** has to be built on a Mac. The committed `.dmg` was built with `scripts/build-macos.sh` and committed to `release/macos/`. Alternatively, use the [macOS build](.github/workflows/macos.yml) workflow (**Actions → macOS build → Run workflow**). With *publish* ticked, the workflow creates the GitHub Release `v<version>` with the macOS `.dmg` and the Linux and Windows installers from `release/`. GitHub Actions only runs while the account has no billing lock: a locked account cannot start jobs, even free ones on public repositories.
-
-## Getting started
-
-1. Open Pātaka and choose how to protect your data: a **passphrase** (recommended) or the **OS keychain**.
-2. Choose **Connect a model** (in **Settings → Providers**, or at the end of the model menu) and pick one:
-   - **On this device:** start [Ollama](https://ollama.com) or LM Studio first; Pātaka lists its models.
-   - **Your subscription:** install [Claude Code](https://claude.com/claude-code) or [Codex](https://developers.openai.com/codex/cli) and sign in once in a terminal (`claude auth login` or `codex login`). Pātaka finds the app and checks you are signed in.
-   - **API key:** paste a key. It is stored encrypted and never shown again.
-3. Open **Settings → Tūmataiti** and press **Install** under *Name model*. This is a one-time download of about 170 MB (250 MB on Windows): the model from Hugging Face and ONNX Runtime from Microsoft's GitHub release. Every file is checked against a SHA-256 built into Pātaka.
-4. Open **Settings → Kaitiaki lists** and add the names, marae, hapū, places and tapu terms that should always be protected, whatever the model finds.
-5. Start a **Kōrero hou** (general) or a **Tapu** kōrero (on-device or sovereign models only).
-
-## Build it yourself
+<details>
+<summary>Build it yourself</summary>
 
 You need [Rust](https://rustup.rs) and Node.js 20 or later (npm is only used to fetch the Tauri CLI).
 
@@ -92,20 +238,15 @@ Each script copies its output into `release/<platform>/` and refreshes `release/
 
 Linux and Windows have no CI, so run `scripts/install-hooks.sh` once. It adds a git pre-push hook that runs `scripts/check.sh` before every push. (The macOS workflow runs the same checks before it builds.)
 
-## Use Pātaka with Claude Code
+### How the installers are built
 
-```bash
-pataka setup          # once: protection, name model, hooks, and a redaction self-test
-pataka claude         # in a project folder, instead of `claude`
-```
+- **Linux and Windows** are built locally with `scripts/build-linux.sh` and `scripts/build-windows.sh`, then committed to [`release/`](release/).
+- **macOS** has to be built on a Mac. The committed `.dmg` was built with `scripts/build-macos.sh` and committed to `release/macos/`. Alternatively, use the [macOS build](.github/workflows/macos.yml) workflow (**Actions → macOS build → Run workflow**). With *publish* ticked, the workflow creates the GitHub Release `v<version>` with the macOS `.dmg` and the Linux and Windows installers from `release/`. GitHub Actions only runs while the account has no billing lock: a locked account cannot start jobs, even free ones on public repositories.
 
-Claude Code works exactly as usual, and every argument passes through. Pātaka starts its Tūmataiti proxy on 127.0.0.1, behind a secret path, and points Claude Code at it with telemetry switched off. Every request is redacted on the way out (prompts, file contents, command output, Claude Code's own instructions), and placeholders are filled back in on the way back. Optional hooks refuse prompts containing tapu terms or secrets, and ask before commands that send data out (`curl`, `scp`, `git push`…) or reach outside the project. Lists, the name model and the audit log are managed from the terminal too (`pataka lists add-person "Hēmi Te Rangi"`, `pataka model install`, `pataka audit verify`), and are shared with the app.
+</details>
 
-For every Claude Code session started from a terminal, `pataka service install` runs the proxy at login and points Claude Code's settings at it. It does not cover the Claude desktop app, which starts Claude Code with its own model address. It fails closed: while the service is locked or stopped, nothing reaches Anthropic.
-
-Claude Code keeps its own transcripts in `~/.claude`, with real values, on your computer; only redacted text reaches Anthropic. Full details: [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md).
-
-## Agents
+<details>
+<summary>Agents in the app</summary>
 
 An agent kōrero runs Claude Code in the folder you choose, the way T3 Code drives it, with Pātaka in the middle:
 
@@ -127,7 +268,10 @@ Limits:
 - A command you approve runs with real values. A command that uses the network, such as `curl`, could send them somewhere, so read commands before allowing them.
 - Codex is not yet available as an agent engine. Its sign-in and API need a different proxy.
 
-## Layout
+</details>
+
+<details>
+<summary>Code layout</summary>
 
 ```
 crates/pataka-core/   the engine, shared by the app and the pataka command:
@@ -154,14 +298,7 @@ release/           committed Linux and Windows installers and SHA256SUMS
 .github/workflows/ macOS build on a GitHub-hosted Mac, publishes the GitHub Release
 ```
 
-## Limits
-
-Redaction reduces risk; it does not remove it.
-
-- No detector catches everything. Tūmataiti's own evaluation finds that rules plus a student model still miss personal information in some held-out NZ documents (see its [results](https://github.com/woodRock/tumataiti/tree/main/ml/results)). Always read the outbound text in the review step.
-- Without the name model installed (or on Intel Macs, which ONNX Runtime 1.31 has no build for), **names, addresses and whakapapa are only caught if they are on a kaitiaki list** or added in the review step.
-- A model can sometimes infer who someone is from context alone.
-- Once text reaches a provider, its own terms decide what happens to it.
+</details>
 
 ## Licence
 
