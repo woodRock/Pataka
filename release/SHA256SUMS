@@ -1,9 +1,9 @@
-1addc0b21f3f340112d110b1077eae2d4481f6958279b71d25e107301b2cbbd1  cli/pataka-0.5.0-universal-apple-darwin
+9fbe3715f164b6a03f6c8165983bf4093a581350e721803f77842088dd0d3532  cli/pataka-0.5.0-universal-apple-darwin
 2cb0552e7f4932a0ea65005d63b4216151b7ac26de33e5458cb120f0c64fdb41  cli/pataka-0.5.0-x86_64-pc-windows-gnu.exe
 94aba40450e7092470118f27d4311570e727ecfea7789807b35d74de472ccce7  cli/pataka-0.5.0-x86_64-unknown-linux-gnu
 c4132f71a0182c76146d16b83e96281d851aff76e4e6beda8c62800180163085  linux/Pataka-0.5.0-1.x86_64.rpm
 414fad1ddee7c0a19d830184130960ea3d89bdaf3dfdb60632b713e8ecd38be3  linux/Pataka_0.5.0_amd64.AppImage
 0999b63a52050dc14fb6fd11625341b202ac78c9db5bfe68e68595e9c5b35e40  linux/Pataka_0.5.0_amd64.deb
-bc774cc1af7b5efdb89ea817edd0bf6233d419abfcb17727f127608bb8bcc35d  macos/Pataka_0.5.0_universal.app.zip
-8b7a94657e82e2ecf1737291c50f702aaa2c874b64141bcb1adb156a58d6ecf1  macos/Pataka_0.5.0_universal.dmg
+bb1039c7276b789df8a85d9cb472f223176da0f0e87e47031ef4995dd50c8ad3  macos/Pataka_0.5.0_universal.app.zip
+0c18c6937f992a0a25493af8cb44a572e66471f82cc74fe94f548c2bb842999e  macos/Pataka_0.5.0_universal.dmg
 51f1e52929519047d8f68c157e252373e9efda4d84397b5c2043d3e2788c3f60  windows/Pataka_0.5.0_x64-setup.exe
