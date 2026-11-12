@@ -4,7 +4,7 @@ A Claude Code mod that redacts personal and culturally sensitive details before 
 
 - **Typed prompts** are redacted before they are shown, stored or sent. A tapu term stops the prompt.
 - **Everything else entering the conversation** (file contents, command output, attachments, injected context) is redacted before it is stored. Images and documents are withheld, because they cannot be checked.
-- **Local tools** (Bash, Read, Write, Edit, Glob, Grep…) get the real values back in their arguments just before they run, so Claude still works on your real files. Network and MCP tools keep the placeholders.
+- **Local tools** (Bash, Read, Write, Edit, Glob, Grep…) get the real values back in their arguments just before they run, so Claude still works on your real files. Network and MCP tools keep the placeholders, except Pātaka Mail's own tools in a `pataka claude` session that registered them (see `docs/CLAUDE-CODE.md`, "Mail").
 
 It uses the Pātaka service for the Tūmataiti rules, the name model, your kaitiaki lists and the placeholder vault, so set that up first:
 

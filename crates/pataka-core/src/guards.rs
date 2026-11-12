@@ -160,9 +160,70 @@ pub fn review_command(command: &str, workspace: &Path) -> Option<String> {
     None
 }
 
+/// Mail changes touching more than this many messages always ask.
+pub const MAIL_BULK: usize = 25;
+
+/// The part of a Pātaka Mail tool name after `mcp__pataka-mail__`.
+fn mail_tool(tool: &str) -> Option<&str> {
+    tool.strip_prefix(crate::mail::TOOL_PREFIX)
+}
+
+/// A Pātaka Mail tool that changes the mailbox (anything but search, read
+/// and list_labels, including tools this version does not know).
+pub fn is_mail_mutation(tool: &str) -> bool {
+    mail_tool(tool).is_some_and(|t| !crate::mail::mcp::READ_TOOLS.contains(&t))
+}
+
+/// Pātaka Mail's own rule. Reading never asks. `trash` always asks. Other
+/// changes ask when they touch more than `MAIL_BULK` messages, and, when
+/// `strict` (auto mode, where nobody else would ask), always: email is
+/// untrusted input that can carry instructions aimed at Claude, so every
+/// change needs the person's explicit yes there.
+pub fn review_mail(tool: &str, input: &Value, strict: bool) -> Option<String> {
+    let name = mail_tool(tool)?;
+    if crate::mail::mcp::READ_TOOLS.contains(&name) {
+        return None;
+    }
+    let n = input["ids"].as_array().map(|a| a.len()).unwrap_or(0);
+    let emails = if n == 1 {
+        "1 email".to_string()
+    } else {
+        format!("{n} emails")
+    };
+    let what = match name {
+        "trash" => return Some(format!("this moves {emails} to the Trash")),
+        "label" => format!("this changes labels on {emails}"),
+        "move" => format!(
+            "this moves {emails} to {}",
+            input["to"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .unwrap_or("another label")
+        ),
+        "archive" => format!("this archives {emails}"),
+        "mark" => format!("this marks {emails} as {}", input["as"].as_str().unwrap_or("changed")),
+        "create_label" => "this creates a label in your mailbox".to_string(),
+        "draft" => "this saves a draft email in Drafts (it is not sent)".to_string(),
+        other => format!("this changes your mailbox ({other})"),
+    };
+    (strict || n > MAIL_BULK || !crate::mail::mcp::WRITE_TOOLS.contains(&name)).then_some(what)
+}
+
+/// `review_tool` for a session in auto mode: the same, except that every
+/// Pātaka Mail change asks.
+pub fn review_tool_auto(tool: &str, input: &Value, workspace: &Path) -> Option<String> {
+    if mail_tool(tool).is_some() {
+        return review_mail(tool, input, true);
+    }
+    review_tool(tool, input, workspace)
+}
+
 /// Why this tool call must be approved, if it must (`None`: Pātaka's guards
 /// have no objection).
 pub fn review_tool(tool: &str, input: &Value, workspace: &Path) -> Option<String> {
+    if mail_tool(tool).is_some() {
+        return review_mail(tool, input, false);
+    }
     if tool.starts_with("mcp__") {
         return Some("it sends data to an MCP server".into());
     }
@@ -238,5 +299,70 @@ mod tests {
         assert!(review_tool("WebFetch", &json!({"url": "https://x"}), &ws()).is_some());
         assert!(review_tool("mcp__slack__send", &json!({}), &ws()).is_some());
         assert!(review_tool("TodoWrite", &json!({}), &ws()).is_none());
+    }
+
+    fn ids(n: usize) -> Value {
+        json!((0..n).map(|i| format!("g1.{i}")).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn mail_reads_do_not_ask() {
+        for t in ["search", "read", "thread", "drafts", "list_labels"] {
+            let tool = format!("mcp__pataka-mail__{t}");
+            assert!(review_tool(&tool, &json!({"query": "from:x"}), &ws()).is_none(), "{t}");
+            assert!(review_tool_auto(&tool, &json!({}), &ws()).is_none(), "{t}");
+        }
+        // Another server with a similar name still asks.
+        assert!(review_tool("mcp__pataka-mailer__search", &json!({}), &ws()).is_some());
+    }
+
+    #[test]
+    fn mail_changes_ask_above_the_threshold() {
+        for t in ["label", "move", "archive", "mark"] {
+            let tool = format!("mcp__pataka-mail__{t}");
+            assert!(
+                review_tool(&tool, &json!({"ids": ids(MAIL_BULK)}), &ws()).is_none(),
+                "{t}"
+            );
+            assert!(
+                review_tool(&tool, &json!({"ids": ids(MAIL_BULK + 1)}), &ws()).is_some(),
+                "{t}"
+            );
+        }
+        assert_eq!(
+            review_tool("mcp__pataka-mail__archive", &json!({"ids": ids(214)}), &ws()).as_deref(),
+            Some("this archives 214 emails")
+        );
+    }
+
+    #[test]
+    fn trash_always_asks() {
+        let r = review_tool("mcp__pataka-mail__trash", &json!({"ids": ids(1)}), &ws());
+        assert_eq!(r.as_deref(), Some("this moves 1 email to the Trash"));
+    }
+
+    #[test]
+    fn auto_mode_asks_for_every_mail_change() {
+        for t in [
+            "label",
+            "move",
+            "archive",
+            "mark",
+            "create_label",
+            "trash",
+            "something_new",
+        ] {
+            let tool = format!("mcp__pataka-mail__{t}");
+            assert!(
+                review_tool_auto(&tool, &json!({"ids": ids(1), "name": "x"}), &ws()).is_some(),
+                "{t}"
+            );
+            assert!(is_mail_mutation(&tool));
+        }
+        assert!(!is_mail_mutation("mcp__pataka-mail__search"));
+        assert!(!is_mail_mutation("mcp__slack__send"));
+        // Outside mail, auto mode reviews exactly as before.
+        assert!(review_tool_auto("Bash", &json!({"command": "ls"}), &ws()).is_none());
+        assert!(review_tool_auto("Bash", &json!({"command": "curl x"}), &ws()).is_some());
     }
 }

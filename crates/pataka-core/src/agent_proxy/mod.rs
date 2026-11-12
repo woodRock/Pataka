@@ -51,6 +51,11 @@ pub trait Host: Send + Sync + 'static {
     fn lock(&self) -> Result<()> {
         Err(Error::Invalid("This proxy cannot be locked from outside.".into()))
     }
+    /// Pātaka Mail's encrypted account store, with the unlocked key. Only
+    /// hosts that serve the mail tools provide it.
+    fn mail(&self) -> Result<crate::mail::MailVault> {
+        Err(Error::Invalid("Pātaka Mail is not available in this session.".into()))
+    }
 }
 
 #[derive(Clone)]
@@ -59,6 +64,9 @@ pub struct Session {
     /// e.g. `https://api.anthropic.com`
     pub upstream: String,
     pub vault: Arc<Mutex<Vault>>,
+    /// This session registered Pātaka Mail (`{base}/pataka/mcp`): serve it,
+    /// and restore placeholders in `mcp__pataka-mail__*` tool arguments.
+    pub mail: bool,
 }
 
 #[derive(Clone)]
@@ -181,6 +189,11 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
             .expect("response builds");
     }
 
+    // Pātaka Mail's MCP server, for sessions that registered it.
+    if rest == "pataka/mcp" {
+        return mail_mcp(&st, &session, &method, &headers, &body).await;
+    }
+
     // Controls for a long-running proxy. Never forwarded.
     if let Some(action) = rest.strip_prefix("pataka/") {
         return control(&st, &session, &method, action, &body).await;
@@ -239,12 +252,75 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
             },
         );
     }
+    if rest == "v1/messages" {
+        log_request(&json);
+    }
     let restore = if rest == "v1/messages" {
-        Some((session.vault.clone(), streaming))
+        Some((session.vault.clone(), streaming, session.mail))
     } else {
         None
     };
     forward(&st, method, &target, &headers, Some(json.to_string()), restore).await
+}
+
+/// `{base}/pataka/mcp`: the `pataka-mail` MCP server (Streamable HTTP,
+/// JSON responses). Served only to sessions that registered it, never to a
+/// browser (any `Origin` header is refused), and only while unlocked.
+async fn mail_mcp(st: &ProxyState, session: &Session, method: &Method, headers: &HeaderMap, body: &Bytes) -> Response {
+    if !session.mail {
+        return error(StatusCode::NOT_FOUND, "Pātaka Mail is not part of this session.");
+    }
+    if headers.contains_key("origin") {
+        return error(StatusCode::FORBIDDEN, "Pātaka Mail only answers Claude Code.");
+    }
+    if method != Method::POST {
+        return Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header("allow", "POST")
+            .body(Body::empty())
+            .expect("response builds");
+    }
+    let Ok(msg) = serde_json::from_slice::<Value>(body) else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error"}}),
+        );
+    };
+    if st.host.status()["locked"] == true {
+        return json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": "Pātaka is locked."}));
+    }
+    let vault = match st.host.mail() {
+        Ok(v) => v,
+        Err(e) => return json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": e.to_string()})),
+    };
+    let ctx = crate::mail::mcp::McpContext {
+        vault,
+        audit: st.host.audit_path(),
+        korero: session.korero.clone(),
+    };
+    match crate::mail::mcp::handle(&ctx, &msg).await {
+        Some(v) => json_response(StatusCode::OK, v),
+        None => Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .body(Body::empty())
+            .expect("response builds"),
+    }
+}
+
+/// `PATAKA_REQUEST_LOG=<file>`: append each request exactly as it leaves for
+/// the model, after redaction, one JSON line each, so a person can check what
+/// was sent (`grep` it for a name). It only ever holds redacted text. Off
+/// unless set; the file is created owner-only.
+fn log_request(body: &Value) {
+    let Some(path) = std::env::var_os("PATAKA_REQUEST_LOG").filter(|p| !p.is_empty()) else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let line = serde_json::json!({"ts": crate::model::now(), "request": body}).to_string();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        crate::store::restrict(&path);
+        let _ = std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes());
+    }
 }
 
 fn json_response(status: StatusCode, v: Value) -> Response {
@@ -453,7 +529,7 @@ async fn forward(
     target: &str,
     headers: &HeaderMap,
     body: Option<String>,
-    restore: Option<(Arc<Mutex<Vault>>, bool)>,
+    restore: Option<(Arc<Mutex<Vault>>, bool, bool)>,
 ) -> Response {
     let mut req = st.client.request(method, target);
     for (name, value) in headers {
@@ -483,7 +559,7 @@ async fn forward(
             out = out.header(name, value);
         }
     }
-    let Some((vault, streaming)) = restore.filter(|_| status.is_success()) else {
+    let Some((vault, streaming, mail)) = restore.filter(|_| status.is_success()) else {
         return out
             .body(Body::from_stream(resp.bytes_stream()))
             .expect("response builds");
@@ -495,7 +571,7 @@ async fn forward(
         let bytes = resp.bytes().await.unwrap_or_default();
         let body = match serde_json::from_slice::<Value>(&bytes) {
             Ok(mut v) => {
-                redact::restore_response(&mut v, &vault.lock().unwrap_or_else(|p| p.into_inner()));
+                redact::restore_response(&mut v, &vault.lock().unwrap_or_else(|p| p.into_inner()), mail);
                 v.to_string()
             }
             Err(_) => String::from_utf8_lossy(&bytes).to_string(),
@@ -507,7 +583,7 @@ async fn forward(
         (
             resp.bytes_stream(),
             Vec::<u8>::new(),
-            redact::StreamRestorer::default(),
+            redact::StreamRestorer::new(mail),
             vault,
             false,
         ),

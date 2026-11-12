@@ -27,6 +27,26 @@ const LOCAL_TOOLS = new Set([
   'Bash', 'BashOutput', 'KillShell', 'Read', 'Write', 'Edit', 'MultiEdit',
   'NotebookEdit', 'NotebookRead', 'Glob', 'Grep', 'LS',
 ])
+/**
+ * Pātaka Mail's tools (`pataka claude` with a connected mailbox). They search
+ * the person's own mail server, so they need real names too, but only in a
+ * session `pataka claude` started with mail registered: it sets
+ * PATAKA_MAIL_URL to its proxy on 127.0.0.1. Every other MCP tool keeps its
+ * placeholders.
+ */
+const MAIL_TOOL = /^mcp__pataka-mail__[A-Za-z0-9_]+$/
+let mailSession: boolean | undefined
+
+async function restoresInput($: Dollar, tool: string): Promise<boolean> {
+  if (LOCAL_TOOLS.has(tool)) return true
+  if (!MAIL_TOOL.test(tool)) return false
+  if (mailSession === undefined) {
+    const url = (await $.env.get('PATAKA_MAIL_URL')) ?? ''
+    mailSession = url.startsWith('http://127.0.0.1:') && url.endsWith('/pataka/mcp')
+  }
+  return mailSession
+}
+
 /** Keys of tool.call's input that are not the tool's own arguments. */
 const RESERVED = new Set(['tool', 'tool_use_id', 'agentId', 'requestMeta', 'consent'])
 /** Rows the model never reads, or that it wrote itself from placeholders. */
@@ -153,10 +173,11 @@ export const register: Register = on => {
       : next({ ...e, message: { ...e.message, content: withheld(e.message.content as Block[]) } }),
   )
 
-  // Before a local tool runs, its arguments get the real values back.
-  // Network and MCP tools keep the placeholders.
+  // Before a local tool runs, its arguments get the real values back, and so
+  // do Pātaka Mail's under `pataka claude`. Network and other MCP tools keep
+  // the placeholders.
   on('tool.call', async ($, e, next) => {
-    if (!LOCAL_TOOLS.has(e.tool)) return next(e)
+    if (!(await restoresInput($, e.tool))) return next(e)
     const args: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(e)) if (!RESERVED.has(k)) args[k] = v
     if (!PLACEHOLDER.test(JSON.stringify(args))) return next(e)

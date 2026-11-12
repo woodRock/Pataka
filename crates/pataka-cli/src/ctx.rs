@@ -202,6 +202,13 @@ impl Host for CliHost {
         self.store.audit_path()
     }
 
+    fn mail(&self) -> Result<pataka_core::mail::MailVault> {
+        Ok(pataka_core::mail::MailVault {
+            store: self.store.clone(),
+            key: self.key.clone(),
+        })
+    }
+
     fn notify(&self, _korero: &str, event: Value) {
         // Claude Code owns the terminal; only a blocked request is worth
         // mentioning, and Claude Code shows that error itself.

@@ -5,6 +5,7 @@
 //! ```text
 //! keyring.json            how the data key is held (keychain or passphrase), never the key itself
 //! settings.ptk            encrypted settings, providers and API keys
+//! mail.ptk                encrypted Pātaka Mail account and label-name table
 //! korero/<uuid>.ptk       one encrypted file per kōrero
 //! audit.jsonl             hash-chained audit log (counts only, no message text)
 //! ```
@@ -288,6 +289,23 @@ impl Store {
         )
     }
 
+    /// Pātaka Mail: the connected account and the label-name table, in
+    /// `mail.ptk`. Empty when no account was ever connected.
+    pub fn load_mail<T: for<'de> Deserialize<'de> + Default>(&self, key: &DataKey) -> Result<T> {
+        match fs::read(self.root.join("mail.ptk")) {
+            Ok(b) => Self::open_json(key, "pataka:mail", &b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save_mail<T: Serialize>(&self, key: &DataKey, value: &T) -> Result<()> {
+        write_atomic(
+            &self.root.join("mail.ptk"),
+            &Self::seal_json(key, "pataka:mail", value)?,
+        )
+    }
+
     pub fn load_conversation(&self, key: &DataKey, id: &str) -> Result<Conversation> {
         valid_id(id)?;
         let bytes = fs::read(self.conv_path(id)).map_err(|_| Error::NotFound("kōrero".into()))?;
@@ -325,7 +343,7 @@ impl Store {
         for id in self.conversation_ids()? {
             let _ = self.delete_conversation(&id);
         }
-        for f in ["settings.ptk", "keyring.json", "audit.jsonl"] {
+        for f in ["settings.ptk", "mail.ptk", "keyring.json", "audit.jsonl"] {
             let _ = shred(&self.root.join(f));
         }
         if let Ok(e) = keychain_entry() {

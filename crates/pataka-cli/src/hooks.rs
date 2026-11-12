@@ -5,7 +5,8 @@
 //!   otherwise only the rules for secrets apply.
 //! - `PreToolUse` (optional): ask first before commands that send data off
 //!   the computer or reach outside the project folder, web fetches and MCP
-//!   tools, using the same guards as the app.
+//!   tools, using the same guards as the app. Pātaka Mail's changes are
+//!   checked in every permission mode, including auto.
 //!
 //! Installed into `~/.claude/settings.json` only with the person's consent;
 //! a backup of the file is kept, and other hooks are left alone.
@@ -122,13 +123,43 @@ fn defers_to_session(input: &Value) -> bool {
         .is_some_and(|m| DEFERRING_MODES.contains(&m))
 }
 
+/// Pātaka Mail's answer, in any mode. Changes that need approval ask; in
+/// auto mode every change asks, because email is untrusted input that can
+/// carry instructions aimed at Claude, and its auto-mode checks read that
+/// same input. With prompts switched off (`bypassPermissions`, `dontAsk`)
+/// nobody could say yes, so the change is refused.
+fn mail_decision(input: &Value) -> Option<Value> {
+    let tool = input["tool_name"].as_str().unwrap_or("");
+    let reason = guards::review_mail(tool, &input["tool_input"], defers_to_session(input))?;
+    let mode = input["permission_mode"].as_str().unwrap_or("");
+    let (decision, text) = if matches!(mode, "bypassPermissions" | "dontAsk") {
+        (
+            "deny",
+            format!("Pātaka refused: {reason}, and permission prompts are switched off. Switch to the default or auto mode to approve it."),
+        )
+    } else {
+        ("ask", format!("Pātaka asks because {reason}. Email can contain instructions aimed at Claude, so check this is what you asked for."))
+    };
+    Some(
+        json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
+                "permissionDecisionReason": text}}),
+    )
+}
+
 /// `pataka hook pretool`: Claude Code's PreToolUse hook.
 pub fn hook_pretool() -> Result<i32> {
     let input = stdin_json();
+    let tool = input["tool_name"].as_str().unwrap_or("");
+    // Pātaka Mail's tools are judged in every mode, before the guard steps aside.
+    if tool.starts_with(pataka_core::mail::TOOL_PREFIX) {
+        if let Some(out) = mail_decision(&input) {
+            println!("{out}");
+        }
+        return Ok(0);
+    }
     if defers_to_session(&input) {
         return Ok(0);
     }
-    let tool = input["tool_name"].as_str().unwrap_or("");
     let cwd = input["cwd"]
         .as_str()
         .map(PathBuf::from)
@@ -156,6 +187,37 @@ mod tests {
         assert!(!defers_to_session(&json!({"permission_mode": "default"})));
         assert!(!defers_to_session(&json!({"permission_mode": "acceptEdits"})));
         assert!(!defers_to_session(&json!({})));
+    }
+
+    fn mail(tool: &str, n: usize, mode: &str) -> Option<String> {
+        let ids: Vec<String> = (0..n).map(|i| format!("g1.{i}")).collect();
+        mail_decision(
+            &json!({"tool_name": format!("mcp__pataka-mail__{tool}"), "permission_mode": mode,
+                              "tool_input": {"ids": ids}}),
+        )
+        .map(|v| {
+            v["hookSpecificOutput"]["permissionDecision"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+    }
+
+    #[test]
+    fn mail_changes_are_not_left_to_auto_mode() {
+        // Reading never asks, in any mode.
+        assert_eq!(mail("search", 0, "default"), None);
+        assert_eq!(mail("read", 0, "auto"), None);
+        // Small changes follow Claude Code's own settings, except in auto mode.
+        assert_eq!(mail("label", 3, "default"), None);
+        assert_eq!(mail("label", 3, "auto").as_deref(), Some("ask"));
+        // Bulk changes and trash always ask.
+        assert_eq!(mail("archive", 26, "default").as_deref(), Some("ask"));
+        assert_eq!(mail("trash", 1, "acceptEdits").as_deref(), Some("ask"));
+        assert_eq!(mail("trash", 1, "auto").as_deref(), Some("ask"));
+        // With prompts off, a change that needs a yes is refused.
+        assert_eq!(mail("trash", 1, "bypassPermissions").as_deref(), Some("deny"));
+        assert_eq!(mail("mark", 2, "dontAsk").as_deref(), Some("deny"));
     }
 
     #[test]

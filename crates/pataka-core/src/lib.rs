@@ -20,6 +20,7 @@ pub mod claude_hooks;
 pub mod crypto;
 pub mod error;
 pub mod guards;
+pub mod mail;
 pub mod model;
 pub mod model_install;
 pub mod paths;

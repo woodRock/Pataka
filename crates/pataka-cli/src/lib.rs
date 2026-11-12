@@ -7,6 +7,7 @@ mod claude;
 mod config;
 mod ctx;
 mod hooks;
+mod mail;
 mod service;
 mod setup;
 
@@ -66,6 +67,11 @@ enum Cmd {
     Hooks {
         #[command(subcommand)]
         action: HooksCmd,
+    },
+    /// Pātaka Mail: let Claude Code read and organise your mailbox over IMAP.
+    Mail {
+        #[command(subcommand)]
+        action: MailCmd,
     },
     /// What is set up.
     Status,
@@ -133,6 +139,25 @@ enum AuditCmd {
 }
 
 #[derive(Subcommand)]
+enum MailCmd {
+    /// Connect a mailbox: asks for the address and an IMAP app password, and tests the login.
+    Connect {
+        /// IMAP server, `host` or `host:port` (default imap.gmail.com:993, TLS).
+        #[arg(long)]
+        host: Option<String>,
+        /// The email address (asked for if not given).
+        #[arg(long)]
+        email: Option<String>,
+    },
+    /// Forget the stored account.
+    Disconnect,
+    /// Is a mailbox connected?
+    Status,
+    /// Reverse one change Claude made, by its audit entry number.
+    Undo { entry: u64 },
+}
+
+#[derive(Subcommand)]
 enum HooksCmd {
     /// Add the hooks (asks first).
     Install {
@@ -195,6 +220,12 @@ pub fn run() -> i32 {
                 );
                 0
             }),
+        },
+        Cmd::Mail { action } => match action {
+            MailCmd::Connect { host, email } => mail::connect(host, email),
+            MailCmd::Disconnect => mail::disconnect(),
+            MailCmd::Status => mail::status(),
+            MailCmd::Undo { entry } => mail::undo(entry),
         },
         Cmd::Status => config::status(),
         Cmd::Hook { which } => match which.as_str() {

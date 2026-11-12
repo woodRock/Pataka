@@ -305,6 +305,8 @@ pub async fn start(host: Arc<ServiceHost>, cfg: &ServiceConfig) -> Result<(agent
             korero: cfg.korero.clone(),
             upstream: cfg.upstream.clone(),
             vault: host.vault.clone(),
+            // Plain `claude` sessions do not register Pātaka Mail.
+            mail: false,
         },
         cfg.token.clone(),
     );

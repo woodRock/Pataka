@@ -40,18 +40,23 @@ pub struct Running {
     pub base_url: String,
     pub korero: String,
     pub title: String,
+    /// Pātaka Mail is served at `{base_url}/pataka/mcp`.
+    pub mail: bool,
 }
 
 /// Unlock, find the terminal kōrero for this folder, and start the proxy.
-pub fn start(rt: &tokio::runtime::Runtime, folder: &std::path::Path) -> Result<Running> {
+/// `with_mail`: serve Pātaka Mail if a mailbox is connected.
+pub fn start(rt: &tokio::runtime::Runtime, folder: &std::path::Path, with_mail: bool) -> Result<Running> {
     let ctx = Ctx::open()?;
     let conv = ctx.terminal_korero(folder)?;
+    let mail = with_mail && crate::mail::connected(&ctx);
     let host: Arc<dyn agent_proxy::Host> = Arc::new(CliHost::new(&ctx));
     let proxy = rt.block_on(agent_proxy::start(host))?;
     let base_url = proxy.open(Session {
         korero: conv.id.clone(),
         upstream: upstream()?,
         vault: Arc::new(Mutex::new(conv.vault.clone())),
+        mail,
     });
     audit::append(
         &ctx.store.audit_path(),
@@ -66,6 +71,7 @@ pub fn start(rt: &tokio::runtime::Runtime, folder: &std::path::Path) -> Result<R
         base_url,
         korero: conv.id,
         title: conv.title,
+        mail,
     })
 }
 
@@ -90,11 +96,18 @@ pub fn claude(args: Vec<String>) -> Result<i32> {
         })?;
     let rt = runtime()?;
     let folder = current_folder()?;
-    let run = start(&rt, &folder)?;
+    let run = start(&rt, &folder, true)?;
     eprintln!(
         "pataka: Claude Code is going through Tūmataiti ({}). Only redacted text reaches Anthropic.",
         run.title
     );
+    let mut args = args;
+    if run.mail {
+        eprintln!("pataka: your mailbox is available to Claude Code as pataka-mail (changes ask first in auto mode); claude.ai connectors are off for this session.");
+        let mut extra = mail_args(&pataka_core::claude_hooks::exe()?);
+        extra.append(&mut args);
+        args = extra;
+    }
 
     // Claude Code handles Ctrl-C itself; this process must not die first,
     // or the proxy would vanish under it.
@@ -106,11 +119,20 @@ pub fn claude(args: Vec<String>) -> Result<i32> {
         }
     });
 
-    let status = Command::new(&exe)
+    let mut cmd = Command::new(&exe);
+    if run.mail {
+        // With a mailbox connected, the only mail tools are Pātaka's own. A
+        // claude.ai connector (Gmail, say) reads mail on Anthropic's side,
+        // unredacted, and would only ever see placeholders to search for.
+        cmd.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
+    }
+    let status = cmd
         .args(&args)
         .env("ANTHROPIC_BASE_URL", &run.base_url)
         .env("PATAKA_HOOK_URL", format!("{}/pataka/check-prompt", run.base_url))
         .env("PATAKA_KORERO", &run.korero)
+        // Read by the inline MCP config, so the secret path is not in the arguments.
+        .env("PATAKA_MAIL_URL", format!("{}/pataka/mcp", run.base_url))
         // No telemetry, error reports or other background traffic.
         .env("DISABLE_TELEMETRY", "1")
         .env("DISABLE_ERROR_REPORTING", "1")
@@ -121,11 +143,32 @@ pub fn claude(args: Vec<String>) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+/// Arguments that register Pātaka Mail with Claude Code for this session:
+///
+/// - `--mcp-config`: the `pataka-mail` server, inline. Its address comes
+///   from `PATAKA_MAIL_URL`, which Claude Code expands, so the secret path
+///   never appears in the process list.
+/// - `--settings`: the PreToolUse guard for its tools only, so mail changes
+///   ask first in every mode even where `pataka hooks` was not installed.
+pub fn mail_args(exe: &str) -> Vec<String> {
+    let mcp = serde_json::json!({"mcpServers": {pataka_core::mail::SERVER_NAME: {
+        "type": "http", "url": "${PATAKA_MAIL_URL}"}}});
+    let settings = serde_json::json!({"hooks": {"PreToolUse": [{
+        "matcher": "mcp__pataka-mail__.*",
+        "hooks": [{"type": "command", "command": format!("\"{exe}\" hook pretool")}]}]}});
+    vec![
+        "--mcp-config".into(),
+        mcp.to_string(),
+        "--settings".into(),
+        settings.to_string(),
+    ]
+}
+
 /// Run only the proxy, for other tools or a Claude Code started by hand.
 pub fn proxy() -> Result<i32> {
     let rt = runtime()?;
     let folder = current_folder()?;
-    let run = start(&rt, &folder)?;
+    let run = start(&rt, &folder, false)?;
     println!(
         "Pātaka's Tūmataiti proxy is running for {} ({}).",
         folder.display(),
@@ -148,4 +191,20 @@ pub fn proxy() -> Result<i32> {
     });
     run.proxy.close_all();
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mail_registration_keeps_the_secret_out_of_the_arguments() {
+        let a = mail_args("/usr/local/bin/pataka");
+        assert_eq!(a[0], "--mcp-config");
+        let mcp: serde_json::Value = serde_json::from_str(&a[1]).unwrap();
+        assert_eq!(mcp["mcpServers"]["pataka-mail"]["url"], "${PATAKA_MAIL_URL}");
+        assert!(!a.iter().any(|x| x.contains("/s/")));
+        let s: serde_json::Value = serde_json::from_str(&a[3]).unwrap();
+        assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "mcp__pataka-mail__.*");
+    }
 }

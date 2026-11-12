@@ -45,6 +45,11 @@ pub struct Entry {
     pub outbound_chars: Option<usize>,
     #[serde(default)]
     pub detail: Option<String>,
+    /// Pātaka Mail: what a mutation changed (ids, hashed label references),
+    /// so it can be undone. Never subjects, addresses or message text.
+    /// Omitted when empty, so older entries hash exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail: Option<serde_json::Value>,
     pub prev: String,
     pub hash: String,
 }
@@ -83,6 +88,11 @@ pub fn append(path: &Path, mut e: Entry) -> Result<Entry> {
     writeln!(f, "{}", serde_json::to_string(&e)?)?;
     f.sync_all()?;
     Ok(e)
+}
+
+/// Every entry, oldest first.
+pub fn all(path: &Path) -> Result<Vec<Entry>> {
+    read_all(path)
 }
 
 pub fn recent(path: &Path, limit: usize) -> Result<Vec<Entry>> {

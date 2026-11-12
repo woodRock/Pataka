@@ -239,6 +239,8 @@ async fn spawn(
         korero: conv.id.clone(),
         upstream: upstream(),
         vault: Arc::new(Mutex::new(conv.vault.clone())),
+        // The app does not offer Pātaka Mail yet.
+        mail: false,
     });
 
     let mut args: Vec<String> = [
@@ -549,7 +551,11 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
                 let tool = r["tool_name"].as_str().unwrap_or("").to_string();
                 let tool_use_id = r["tool_use_id"].as_str().unwrap_or("").to_string();
                 // Pātaka's guards ask whatever the mode or earlier answers.
-                let guard = guards::review_tool(&tool, &r["input"], &run.workspace);
+                let guard = if run.mode == "auto" {
+                    guards::review_tool_auto(&tool, &r["input"], &run.workspace)
+                } else {
+                    guards::review_tool(&tool, &r["input"], &run.workspace)
+                };
                 if guard.is_none() {
                     let how = if run.mode == "auto" {
                         Some("auto mode")
@@ -937,6 +943,8 @@ pub async fn agent_permission(
                      "response": {"behavior": "deny", "message": "The person declined this in Pātaka."}}}),
     };
     let how = match decision.as_str() {
+        // Mail changes are never "always allowed": each needs its own yes.
+        "always" if guards::is_mail_mutation(&tool) => "allowed",
         "always" => {
             // The tool comes from Pātaka's own record of the request, not the window.
             run.always.lock().unwrap_or_else(|e| e.into_inner()).insert(tool);
