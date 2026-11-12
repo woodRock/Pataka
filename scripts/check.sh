@@ -2,13 +2,13 @@
 # The checks a CI server would run. Run before every commit or push
 # (scripts/install-hooks.sh adds a pre-push hook that runs this).
 source "$(dirname "$0")/common.sh"
-cd "$ROOT/src-tauri"
+cd "$ROOT"
 log "rustfmt"
-cargo fmt --check
+cargo fmt --all --check
 log "clippy (warnings are errors)"
-cargo clippy --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 log "tests"
-cargo test --locked
+cargo test --workspace --locked
 if command -v cargo-audit >/dev/null 2>&1; then
   log "cargo audit (known vulnerabilities in dependencies)"
   cargo audit

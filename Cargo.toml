@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["src-tauri", "crates/pataka-core", "crates/pataka-cli"]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Jesse Wood"]
+rust-version = "1.92"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-thread", "process", "io-util", "net", "signal"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots", "rustls-tls-webpki-roots", "http2", "charset"] }
+zeroize = { version = "1", features = ["derive", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+# Tūmataiti: local NZ PII rules, span merging and redaction policy. Pinned to a commit.
+tumataiti-rules = { git = "https://github.com/woodRock/tumataiti", rev = "ad7ac37fb56b48d2ccf2d71fcd6ec035b0ff97fc" }
+pataka-core = { path = "crates/pataka-core" }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

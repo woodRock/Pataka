@@ -12,19 +12,32 @@ pub mod redact;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::audit;
+use crate::error::{Error, Result};
+use crate::model::{Kaupapa, Term};
+use crate::redaction::Vault;
+use crate::student::Student;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use futures_util::StreamExt;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
 
-use crate::audit;
-use crate::error::{Error, Result};
-use crate::redaction::Vault;
-use crate::state::AppState;
-use crate::student;
+/// What the proxy needs from whoever runs it: the desktop app or the
+/// `pataka` command. Both read the same encrypted store.
+pub trait Host: Send + Sync + 'static {
+    /// The kaupapa, plus the kōrero's own terms and allow-list. Fails while
+    /// Pātaka is locked, so nothing is forwarded unchecked.
+    fn context(&self, korero: &str) -> Result<(Kaupapa, Vec<Term>, Vec<String>)>;
+    /// The name model, when it is installed and switched on.
+    fn model(&self) -> Result<Option<Arc<Student>>>;
+    /// Keep the placeholder vault with the kōrero, so it survives restarts.
+    fn save_vault(&self, korero: &str, vault: &Vault) -> Result<()>;
+    fn audit_path(&self) -> std::path::PathBuf;
+    /// Tell the person what happened (the app shows it; the CLI may ignore it).
+    fn notify(&self, korero: &str, event: Value);
+}
 
 #[derive(Clone)]
 pub struct Session {
@@ -36,7 +49,7 @@ pub struct Session {
 
 #[derive(Clone)]
 struct ProxyState {
-    app: AppHandle,
+    host: Arc<dyn Host>,
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     client: reqwest::Client,
 }
@@ -76,17 +89,17 @@ fn rand_token() -> [u8; 24] {
 }
 
 /// Start the proxy on a free port on 127.0.0.1.
-pub async fn start(app: AppHandle) -> Result<Proxy> {
+pub async fn start(host: Arc<dyn Host>) -> Result<Proxy> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let sessions = Arc::new(Mutex::new(HashMap::new()));
     let state = ProxyState {
-        app,
+        host,
         sessions: sessions.clone(),
         client: crate::providers::http_client(),
     };
     let router = axum::Router::new().fallback(handle).with_state(state);
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
     Ok(Proxy { port, sessions })
@@ -137,15 +150,15 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
     };
     let streaming = json["stream"].as_bool().unwrap_or(false);
     let redacted = {
-        let app = st.app.clone();
+        let host = st.host.clone();
         let session = session.clone();
-        tauri::async_runtime::spawn_blocking(move || redact_request(&app, &session, &mut json).map(|s| (json, s))).await
+        tokio::task::spawn_blocking(move || redact_request(host.as_ref(), &session, &mut json).map(|s| (json, s))).await
     };
     let (json, stats) = match redacted {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            let _ = st.app.emit(
-                "agent-notice",
+            st.host.notify(
+                &session.korero,
                 serde_json::json!({"korero": session.korero, "error": e.to_string()}),
             );
             return error(StatusCode::BAD_REQUEST, &format!("Pātaka stopped this request: {e}"));
@@ -157,13 +170,11 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
             )
         }
     };
-    let _ = st.app.emit(
-        "agent-notice",
-        serde_json::json!({"korero": session.korero, "redacted": stats.categories.values().sum::<u32>(), "withheld": stats.withheld_media}),
+    st.host.notify(&session.korero, serde_json::json!({"korero": session.korero, "redacted": stats.categories.values().sum::<u32>(), "withheld": stats.withheld_media}),
     );
     if rest == "v1/messages" {
         let _ = audit::append(
-            &st.app.state::<AppState>().store.audit_path(),
+            &st.host.audit_path(),
             audit::Entry {
                 event: "agent-request".into(),
                 korero: Some(session.korero.clone()),
@@ -186,23 +197,15 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
 /// Redact a request in place with the kōrero's vault, the kaupapa and (if
 /// installed and switched on) the name model. Fails when Pātaka is locked or
 /// the request holds tapu content.
-fn redact_request(app: &AppHandle, session: &Session, body: &mut Value) -> Result<redact::Stats> {
-    let state = app.state::<AppState>();
-    let (kaupapa, conv) = state.with_session(|s| {
-        let c = state.store.load_conversation(&s.key, &session.korero)?;
-        Ok((s.settings.kaupapa.clone(), c))
-    })?;
+pub fn redact_request(host: &dyn Host, session: &Session, body: &mut Value) -> Result<redact::Stats> {
+    let (kaupapa, conv_terms, conv_allow) = host.context(&session.korero)?;
     let k = redact::agent_kaupapa(&kaupapa);
-    let model = if kaupapa.use_model && student::is_installed(state.store.root()) {
-        Some(state.student()?)
-    } else {
-        None
-    };
+    let model = if kaupapa.use_model { host.model()? } else { None };
     let detect = |t: &str| model.as_ref().and_then(|m| m.detect(t).ok()).unwrap_or_default();
     let mut vault = session.vault.lock().unwrap_or_else(|p| p.into_inner());
-    let mut terms = conv.terms.clone();
+    let mut terms = conv_terms;
     terms.extend(redact::identity_terms());
-    let mut allow = conv.allow.clone();
+    let mut allow = conv_allow;
     allow.extend(redact::AGENT_ALLOW.iter().map(|s| s.to_string()));
     let mut r = redact::Redactor {
         kaupapa: &k,
@@ -217,7 +220,7 @@ fn redact_request(app: &AppHandle, session: &Session, body: &mut Value) -> Resul
     r.request(body);
     if r.tapu {
         let _ = audit::append(
-            &state.store.audit_path(),
+            &host.audit_path(),
             audit::Entry {
                 event: "agent-blocked".into(),
                 korero: Some(session.korero.clone()),
@@ -233,11 +236,7 @@ fn redact_request(app: &AppHandle, session: &Session, body: &mut Value) -> Resul
     // Keep the placeholders with the kōrero, so they stay the same after a restart.
     let snapshot = vault.clone();
     drop(vault);
-    state.with_session(|s| {
-        let mut c = state.store.load_conversation(&s.key, &session.korero)?;
-        c.vault = snapshot;
-        state.store.save_conversation(&s.key, &c)
-    })?;
+    host.save_vault(&session.korero, &snapshot)?;
     Ok(stats)
 }
 

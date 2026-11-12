@@ -1082,6 +1082,15 @@ dependencies = [
 
 [[package]]
 name = "dirs"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs"
 version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
@@ -3175,13 +3184,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
-name = "pataka"
-version = "0.4.0"
+name = "pataka-cli"
+version = "0.5.0"
+dependencies = [
+ "pataka-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "pataka-core"
+version = "0.5.0"
 dependencies = [
  "argon2",
  "axum",
  "base64 0.22.1",
  "chacha20poly1305",
+ "dirs 6.0.0",
  "flate2",
  "futures-util",
  "hex",
@@ -3193,12 +3215,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
  "tempfile",
  "thiserror 2.0.21",
- "time",
  "tokenizers",
  "tokio",
  "tumataiti-rules",
@@ -3206,6 +3224,28 @@ dependencies = [
  "uuid",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "pataka-desktop"
+version = "0.5.0"
+dependencies = [
+ "futures-util",
+ "hex",
+ "pataka-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tempfile",
+ "tokio",
+ "tumataiti-rules",
+ "url",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -4714,7 +4754,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "cookie",
- "dirs",
+ "dirs 7.0.0",
  "dunce",
  "embed_plist",
  "getrandom 0.3.4",
@@ -4764,7 +4804,7 @@ checksum = "adddb0e648752aaac5da9c3c3c6a68e1e87cab55e3b757b18a9441ef8c3ac614"
 dependencies = [
  "anyhow",
  "cargo_toml",
- "dirs",
+ "dirs 7.0.0",
  "glob",
  "heck 0.5.0",
  "json-patch",
@@ -5348,7 +5388,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2b9c52859a94554803ccd4a24b98f74148ebc73b90676d783f3490b1bff9d72"
 dependencies = [
  "crossbeam-channel",
- "dirs",
+ "dirs 7.0.0",
  "libappindicator",
  "muda",
  "objc2",
@@ -6221,7 +6261,7 @@ dependencies = [
  "block2",
  "cookie",
  "crossbeam-channel",
- "dirs",
+ "dirs 7.0.0",
  "dom_query 0.29.0",
  "dpi",
  "dunce",

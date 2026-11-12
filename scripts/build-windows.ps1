@@ -9,7 +9,7 @@ npx tauri build --bundles nsis,msi
 $out = Join-Path $root "release\windows"
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force $out | Out-Null
-Copy-Item "src-tauri\target\release\bundle\nsis\*.exe" $out
-Copy-Item "src-tauri\target\release\bundle\msi\*.msi" $out
+Copy-Item "target\release\bundle\nsis\*.exe" $out
+Copy-Item "target\release\bundle\msi\*.msi" $out
 Get-ChildItem $out | ForEach-Object { "{0}  windows/{1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Out-File -Encoding ascii (Join-Path $out "SHA256SUMS.windows")
 Write-Host "done: $out"

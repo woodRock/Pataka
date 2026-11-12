@@ -181,7 +181,7 @@ pub async fn install(client: &reqwest::Client, root: &Path, progress: &(dyn Fn(P
         )
         .await?;
         let (a, l) = (archive.clone(), lib.clone());
-        let r = tauri::async_runtime::spawn_blocking(move || extract(&a, &rt, &l))
+        let r = tokio::task::spawn_blocking(move || extract(&a, &rt, &l))
             .await
             .map_err(|_| Error::Invalid("extracting ONNX Runtime failed".into()))?;
         let _ = fs::remove_file(&archive);

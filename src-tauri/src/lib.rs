@@ -7,20 +7,13 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
-pub mod agent_proxy;
-pub mod audit;
 pub mod commands;
-pub mod crypto;
-pub mod error;
-pub mod guards;
-pub mod model;
-pub mod model_install;
-pub mod providers;
-pub mod redaction;
-pub mod sovereignty;
 pub mod state;
-pub mod store;
-pub mod student;
+
+// The engine lives in pataka-core, shared with the `pataka` command.
+pub use pataka_core::{
+    agent_proxy, audit, crypto, error, guards, model, model_install, providers, redaction, sovereignty, store, student,
+};
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 

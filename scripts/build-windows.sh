@@ -13,6 +13,6 @@ log "building Pātaka $VERSION for Windows (cross-compiled)"
 npx tauri build --target x86_64-pc-windows-gnu --bundles nsis
 out="$RELEASE/windows"
 rm -rf "$out" && mkdir -p "$out"
-cp "$ROOT"/src-tauri/target/x86_64-pc-windows-gnu/release/bundle/nsis/*_"$VERSION"_*.exe "$out"/
+cp "$ROOT"/target/x86_64-pc-windows-gnu/release/bundle/nsis/*_"$VERSION"_*.exe "$out"/
 "$ROOT/scripts/checksums.sh"
 log "done: $out"

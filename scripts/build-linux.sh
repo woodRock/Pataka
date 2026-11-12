@@ -10,7 +10,7 @@ log "building Pātaka $VERSION for Linux"
 npx tauri build --bundles deb,rpm,appimage
 out="$RELEASE/linux"
 rm -rf "$out" && mkdir -p "$out"
-b="$ROOT/src-tauri/target/release/bundle"
+b="$ROOT/target/release/bundle"
 cp "$b"/deb/*_"$VERSION"_*.deb "$b"/rpm/*-"$VERSION"-*.rpm "$b"/appimage/*_"$VERSION"_*.AppImage "$out"/
 "$ROOT/scripts/checksums.sh"
 log "done: $out"

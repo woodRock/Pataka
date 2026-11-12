@@ -162,12 +162,53 @@ fn upstream() -> String {
     "https://api.anthropic.com".into()
 }
 
+/// The app's side of the proxy: the unlocked session's kaupapa and kōrero.
+struct AppHost {
+    app: AppHandle,
+}
+
+impl agent_proxy::Host for AppHost {
+    fn context(&self, korero: &str) -> Result<(Kaupapa, Vec<Term>, Vec<String>)> {
+        let state = self.app.state::<AppState>();
+        state.with_session(|s| {
+            let c = state.store.load_conversation(&s.key, korero)?;
+            Ok((s.settings.kaupapa.clone(), c.terms, c.allow))
+        })
+    }
+
+    fn model(&self) -> Result<Option<Arc<student::Student>>> {
+        let state = self.app.state::<AppState>();
+        if student::is_installed(state.store.root()) {
+            Ok(Some(state.student()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn save_vault(&self, korero: &str, vault: &Vault) -> Result<()> {
+        let state = self.app.state::<AppState>();
+        state.with_session(|s| {
+            let mut c = state.store.load_conversation(&s.key, korero)?;
+            c.vault = vault.clone();
+            state.store.save_conversation(&s.key, &c)
+        })
+    }
+
+    fn audit_path(&self) -> PathBuf {
+        self.app.state::<AppState>().store.audit_path()
+    }
+
+    fn notify(&self, _korero: &str, event: Value) {
+        let _ = self.app.emit("agent-notice", event);
+    }
+}
+
 async fn proxy(app: &AppHandle) -> Result<Arc<agent_proxy::Proxy>> {
     let st = app.state::<AppState>();
     if let Some(p) = st.proxy.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         return Ok(p);
     }
-    let p = Arc::new(agent_proxy::start(app.clone()).await?);
+    let p = Arc::new(agent_proxy::start(Arc::new(AppHost { app: app.clone() })).await?);
     *st.proxy.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
     Ok(p)
 }
