@@ -5,6 +5,9 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 npm ci --no-audit --no-fund
+cargo build --release --locked -p pataka-cli
+New-Item -ItemType Directory -Force "src-tauri\binaries" | Out-Null
+Copy-Item "target\release\pataka.exe" "src-tauri\binaries\pataka-cli-x86_64-pc-windows-msvc.exe"
 npx tauri build --bundles nsis,msi
 $out = Join-Path $root "release\windows"
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }

@@ -16,6 +16,7 @@
 
 pub mod agent_proxy;
 pub mod audit;
+pub mod claude_hooks;
 pub mod crypto;
 pub mod error;
 pub mod guards;

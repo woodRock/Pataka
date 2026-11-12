@@ -63,6 +63,9 @@
       "nsis": {
         "installMode": "currentUser"
       }
-    }
+    },
+    "externalBin": [
+      "binaries/pataka-cli"
+    ]
   }
 }

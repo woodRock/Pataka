@@ -54,6 +54,17 @@ Agent kōrero run Claude Code as a full agent in a folder the person chooses (no
 
 Limits: Claude Code stores its own session transcripts locally, unencrypted (`~/.claude/projects`). Hooks and MCP servers from the person's Claude Code settings still run, and their own network traffic bypasses Pātaka. An approved shell command runs with real values and could send them over the network.
 
+### The `pataka` command (Claude Code in the terminal)
+
+`pataka` is built from the same engine as the app (`crates/pataka-core`), so the proxy, redaction, vault, kaupapa, name model, guards and audit log are one implementation.
+
+- `pataka claude` unlocks the store (OS keychain, or a passphrase typed at the terminal, which is never echoed or passed on), starts the proxy inside its own process on 127.0.0.1 behind a random path, and runs the real `claude` with `ANTHROPIC_BASE_URL` pointing at it. `DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` are set. The proxy stops when Claude Code exits. An existing `ANTHROPIC_BASE_URL` becomes the upstream, and must be https, or http on loopback.
+- It shares the app's data folder, so the vault, lists and audit log are the same. The kaupapa is read afresh for every request, so a list change in either place applies at once. Placeholders for a folder persist in a "Terminal · folder" kōrero.
+- **Hooks**, only installed with consent, merged into `~/.claude/settings.json` with a backup kept. The prompt hook asks the running proxy (a `pataka/check-prompt` endpoint on the same secret path) whether the prompt contains tapu terms, secrets or anything else the kaupapa blocks, so the hook never needs the passphrase. If the proxy cannot be reached, the prompt is refused. In a plain `claude` session it checks for secrets with the rules alone. The tool hook uses the same guards as the app's agents and answers "ask"; it never answers "allow".
+- `pataka setup` ends with a self-test: a request containing an email address and an IRD number goes through the real proxy to a pretend model on 127.0.0.1. Setup fails unless only placeholders arrive and the reply comes back restored.
+- **Install scripts** download from this repository's `release/cli/` folder and check the SHA-256 listed in `release/SHA256SUMS` before installing for the current user only. Both files come from the same place, so this catches a damaged download, not a compromised repository. For that, compare against a checksum you got elsewhere, or build from source (`cargo install --git … pataka-cli`).
+- Claude Code's own transcripts in `~/.claude/projects` hold real values and are not encrypted by Pātaka (see `docs/CLAUDE-CODE.md`).
+
 ### Subscriptions through Claude Code and Codex
 
 Pātaka can use a Claude or ChatGPT subscription by running the vendor's own signed-in command-line app (`claude` or `codex`), the way T3 Code does. Pātaka never handles that login; the app keeps its own credentials. Each message starts a fresh run:

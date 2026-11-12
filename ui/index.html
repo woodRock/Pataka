@@ -160,6 +160,7 @@
         <button role="tab" data-tab="providers" class="active">Providers</button>
         <button role="tab" data-tab="policy">Tūmataiti</button>
         <button role="tab" data-tab="kaitiaki">Kaitiaki lists</button>
+        <button role="tab" data-tab="claudecode">Claude Code</button>
         <button role="tab" data-tab="security">Security &amp; data</button>
         <button role="tab" data-tab="audit">Audit log</button>
         <button role="tab" data-tab="about">Mātāpono</button>
@@ -210,6 +211,22 @@
           <label>Allow unchanged: tūpuna, public figures <textarea id="kt-allow" rows="6" placeholder="names that may be discussed openly in research"></textarea></label>
         </div>
         <button id="save-kaitiaki" class="primary">Save</button>
+      </section>
+
+      <section data-panel="claudecode" class="panel hidden">
+        <h3>Use Tūmataiti with Claude Code in the terminal</h3>
+        <p class="muted">The <code>pataka</code> command runs the real Claude Code with Pātaka's Tūmataiti proxy in the middle, using the same kaitiaki lists, name model and audit log as this app. Claude Code works exactly as usual; only redacted text reaches Anthropic, and real values are filled back in on this computer.</p>
+        <label class="check"><input type="checkbox" id="cc-hooks" checked> Add Pātaka's hooks to Claude Code: refuse prompts that contain tapu terms or secrets</label>
+        <label class="check"><input type="checkbox" id="cc-guard" checked> Also ask first before commands that send data out (curl, scp, git push…) or reach outside the project</label>
+        <div class="row"><button id="cc-install" class="primary">Use Tūmataiti with Claude Code in the terminal</button></div>
+        <div id="cc-status" class="status-box"></div>
+        <div id="cc-next" class="hidden">
+          <p>Open a terminal in your project folder and run:</p>
+          <pre class="outbound">pataka claude</pre>
+          <p id="cc-path" class="hint hidden"></p>
+          <p class="hint">Any Claude Code arguments work after it, for example <code>pataka claude --model opus</code>. Claude Code keeps its own transcripts, with real values, in <code>~/.claude</code> on this computer.</p>
+        </div>
+        <div class="row"><button id="cc-remove-hooks" class="hidden">Remove Pātaka's hooks from Claude Code</button></div>
       </section>
 
       <section data-panel="security" class="panel hidden">

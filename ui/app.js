@@ -332,7 +332,8 @@ function renderKorero() {
   if (c.agent) {
     $('agent-folder').textContent = c.agent.workspace;
     $('agent-folder').title = `The agent works in ${c.agent.workspace}`;
-    $('agent-mode').value = c.agent.mode;
+    // Terminal kōrero (from `pataka claude`) have no app mode; the app asks first.
+    $('agent-mode').value = ['manual', 'acceptEdits', 'plan', 'auto'].includes(c.agent.mode) ? c.agent.mode : 'manual';
   }
   if (state.settings && state.providerFilter !== !!c.agent) fillProviderSelect();
   const box = $('messages');
@@ -894,6 +895,7 @@ for (const tab of document.querySelectorAll('.tabs button')) {
     for (const t of document.querySelectorAll('.tabs button')) t.classList.toggle('active', t === tab);
     for (const p of document.querySelectorAll('.panel')) p.classList.toggle('hidden', p.dataset.panel !== tab.dataset.tab);
     if (tab.dataset.tab === 'audit') attempt(loadAudit);
+    if (tab.dataset.tab === 'claudecode') attempt(loadTerminal);
   });
 }
 
@@ -1273,6 +1275,44 @@ $('wipe').addEventListener('click', () => attempt(async () => {
   $('settings').close();
   await showLock();
   toast('Everything has been deleted.');
+}));
+
+function renderTerminal(st) {
+  const box = $('cc-status');
+  const lines = [];
+  if (!st.bundled && !st.installed) lines.push('This build does not include the pataka command: use the one-line installer in the README.');
+  lines.push(st.installed ? `The pataka command is installed at ${st.installed}.` : 'The pataka command is not installed yet.');
+  lines.push(st.promptHook ? `Hooks are in ${st.settingsFile}${st.toolHook ? ' (prompt check and tool guard)' : ' (prompt check)'}.` : 'Claude Code has no Pātaka hooks.');
+  box.className = `status-box ${st.installed ? 'ok' : ''}`;
+  box.replaceChildren(...lines.map((t) => el('div', { text: t })));
+  show('cc-next', !!st.installed);
+  show('cc-path', !!st.installed && !!st.pathHint);
+  $('cc-path').textContent = st.pathHint ? `${st.dir} is not on your PATH yet. Add it with: ${st.pathHint}  (then open a new terminal)` : '';
+  show('cc-remove-hooks', st.promptHook || st.toolHook);
+  $('cc-install').disabled = !st.bundled;
+  $('cc-install').textContent = st.installed ? 'Update the pataka command and hooks' : 'Use Tūmataiti with Claude Code in the terminal';
+}
+
+async function loadTerminal() {
+  renderTerminal(await call('terminal_status'));
+}
+
+$('cc-guard').addEventListener('change', () => { if ($('cc-guard').checked) $('cc-hooks').checked = true; });
+$('cc-hooks').addEventListener('change', () => { if (!$('cc-hooks').checked) $('cc-guard').checked = false; });
+
+$('cc-install').addEventListener('click', () => attempt(async () => {
+  const st = await call('terminal_status');
+  const hooks = $('cc-hooks').checked;
+  const msg = `Pātaka will copy the pataka command to ${st.dir}`
+    + (hooks ? `, and add its hooks to ${st.settingsFile}. Your other Claude Code settings and hooks are kept, and a backup of the file is saved.` : '.');
+  if (!(await ask(msg, 'Install'))) return;
+  renderTerminal(await call('terminal_install', { hooks, toolGuard: hooks && $('cc-guard').checked }));
+  toast('Installed. Run “pataka claude” in a project folder.');
+}));
+
+$('cc-remove-hooks').addEventListener('click', () => attempt(async () => {
+  if (!(await ask('Remove Pātaka\'s hooks from Claude Code? The pataka command stays installed.', 'Remove'))) return;
+  renderTerminal(await call('terminal_remove_hooks'));
 }));
 
 async function loadAudit() {
