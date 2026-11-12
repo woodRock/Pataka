@@ -144,6 +144,8 @@ pub struct Settings {
     pub system_prompt: String,
     pub last_provider: Option<String>,
     pub last_model: Option<String>,
+    /// The person has confirmed, once, what an agent's auto mode means.
+    pub auto_acknowledged: bool,
 }
 
 impl Default for Settings {
@@ -158,6 +160,7 @@ impl Default for Settings {
             system_prompt: String::new(),
             last_provider: None,
             last_model: None,
+            auto_acknowledged: false,
         }
     }
 }
@@ -230,7 +233,7 @@ pub struct AgentInfo {
     /// Claude Code's session, so the agent can carry on after a restart.
     #[serde(default)]
     pub session_id: Option<String>,
-    /// "manual" (ask before acting), "acceptEdits" or "plan".
+    /// "manual" (ask before acting), "acceptEdits", "plan" or "auto".
     #[serde(default = "default_mode")]
     pub mode: String,
 }

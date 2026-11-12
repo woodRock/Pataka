@@ -216,8 +216,17 @@ fn redact_request(app: &AppHandle, session: &Session, body: &mut Value) -> Resul
     };
     r.request(body);
     if r.tapu {
+        let _ = audit::append(
+            &state.store.audit_path(),
+            audit::Entry {
+                event: "agent-blocked".into(),
+                korero: Some(session.korero.clone()),
+                detail: Some("tapu content in the agent's context".into()),
+                ..Default::default()
+            },
+        );
         return Err(Error::Blocked(
-            "the agent's context contains a term your kaupapa marks tapu".into(),
+            "the agent's context contains a term your kaupapa marks tapu, so nothing was sent. The agent has it in its history now: start a new agent kōrero to carry on.".into(),
         ));
     }
     let stats = r.stats;

@@ -82,6 +82,7 @@
             <option value="manual">Ask before acting</option>
             <option value="acceptEdits">Allow file edits, ask for commands</option>
             <option value="plan">Plan only, change nothing</option>
+            <option value="auto">Auto: act without asking (Pātaka's guards still ask)</option>
           </select>
         </div>
       </header>
@@ -311,6 +312,16 @@
         </div>
       </form>
     </div>
+  </dialog>
+
+  <dialog id="ask-dialog" class="ask">
+    <form method="dialog" class="dialog-body">
+      <p id="ask-text" class="ask-text"></p>
+      <div class="dialog-actions">
+        <button value="cancel" id="ask-cancel">Cancel</button>
+        <button value="ok" id="ask-ok" class="primary">Continue</button>
+      </div>
+    </form>
   </dialog>
 
   <div id="toast" class="toast hidden" role="status"></div>

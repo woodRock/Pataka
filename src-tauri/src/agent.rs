@@ -31,6 +31,7 @@ use crate::agent_proxy;
 use crate::audit;
 use crate::commands::{self, ConversationView, Preview};
 use crate::error::{Error, Result};
+use crate::guards;
 use crate::model::*;
 use crate::providers::cli;
 use crate::redaction::{self, Vault};
@@ -38,7 +39,9 @@ use crate::sovereignty;
 use crate::state::AppState;
 use crate::student;
 
-pub const MODES: [&str; 3] = ["manual", "acceptEdits", "plan"];
+/// "auto" is Pātaka's own: Claude Code still asks Pātaka about every action,
+/// and Pātaka allows it unless a guard says the person must decide.
+pub const MODES: [&str; 4] = ["manual", "acceptEdits", "plan", "auto"];
 const RESULT_LIMIT: usize = 20_000;
 
 /// A running agent process.
@@ -47,9 +50,12 @@ pub struct Running {
     pub provider_id: String,
     pub model: String,
     pub mode: String,
+    workspace: PathBuf,
     base_url: String,
     kill: Arc<Notify>,
     pub busy: AtomicBool,
+    /// The person pressed Stop during this turn.
+    stopped: AtomicBool,
     /// Tools the person allowed for the rest of this session.
     always: Mutex<HashSet<String>>,
     /// Permission requests waiting for the person: request id → (tool use id, tool name).
@@ -209,10 +215,10 @@ async fn spawn(
     .iter()
     .map(|s| s.to_string())
     .collect();
-    args.push(if MODES.contains(&info.mode.as_str()) {
-        info.mode.clone()
-    } else {
-        "manual".into()
+    // Auto is decided by Pātaka, so Claude Code asks Pātaka about everything.
+    args.push(match info.mode.as_str() {
+        "acceptEdits" | "plan" => info.mode.clone(),
+        _ => "manual".into(),
     });
     if !model.is_empty() && model != "default" {
         args.push("--model".into());
@@ -250,9 +256,11 @@ async fn spawn(
         provider_id: provider.id.clone(),
         model: model.to_string(),
         mode: info.mode.clone(),
+        workspace: workspace.clone(),
         base_url: base_url.clone(),
         kill: Arc::new(Notify::new()),
         busy: AtomicBool::new(false),
+        stopped: AtomicBool::new(false),
         always: Mutex::new(HashSet::new()),
         pending: Mutex::new(HashMap::new()),
         decided: Mutex::new(HashMap::new()),
@@ -471,6 +479,24 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
                         korero,
                         json!({"kind": "tool_result", "id": id, "result": text, "isError": err}),
                     );
+                    // The audit records which tool ran and how it was decided, never its input or output.
+                    let name = items.iter().find_map(|i| match i {
+                        AgentItem::Tool { id: x, name, .. } if x == id => Some(name.clone()),
+                        _ => None,
+                    });
+                    let _ = audit::append(
+                        &app.state::<AppState>().store.audit_path(),
+                        audit::Entry {
+                            event: "agent-tool".into(),
+                            korero: Some(korero.to_string()),
+                            detail: Some(format!(
+                                "{}: {how}{}",
+                                name.unwrap_or_default(),
+                                if err { ", failed" } else { "" }
+                            )),
+                            ..Default::default()
+                        },
+                    );
                 }
             }
             save_turn(app, korero, run, items, None);
@@ -481,13 +507,24 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
             if r["subtype"] == "can_use_tool" {
                 let tool = r["tool_name"].as_str().unwrap_or("").to_string();
                 let tool_use_id = r["tool_use_id"].as_str().unwrap_or("").to_string();
-                if run.always.lock().unwrap_or_else(|e| e.into_inner()).contains(&tool) {
-                    let _ = run.write(&allow(&request_id, &r["input"])).await;
-                    run.decided
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(tool_use_id, "always".into());
-                    return;
+                // Pātaka's guards ask whatever the mode or earlier answers.
+                let guard = guards::review_tool(&tool, &r["input"], &run.workspace);
+                if guard.is_none() {
+                    let how = if run.mode == "auto" {
+                        Some("auto mode")
+                    } else if run.always.lock().unwrap_or_else(|e| e.into_inner()).contains(&tool) {
+                        Some("always")
+                    } else {
+                        None
+                    };
+                    if let Some(how) = how {
+                        let _ = run.write(&allow(&request_id, &r["input"])).await;
+                        run.decided
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(tool_use_id, how.into());
+                        return;
+                    }
                 }
                 run.pending
                     .lock()
@@ -497,7 +534,7 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
                     app,
                     korero,
                     json!({"kind": "permission", "requestId": request_id, "toolUseId": tool_use_id, "tool": tool,
-                           "input": r["input"], "description": r["description"]}),
+                           "input": r["input"], "description": r["description"], "guard": guard}),
                 );
             } else {
                 // Hooks, MCP and other callbacks are not handled by Pātaka.
@@ -510,7 +547,11 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
             }
         }
         "result" => {
-            let err = if v["is_error"].as_bool().unwrap_or(false) {
+            // After Stop, Claude Code reports an error; it is just the interruption.
+            let stopped = run.stopped.swap(false, Ordering::SeqCst);
+            let err = if stopped {
+                None
+            } else if v["is_error"].as_bool().unwrap_or(false) {
                 Some(truncate(
                     v["result"]
                         .as_str()
@@ -522,6 +563,11 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
                 None
             };
             run.busy.store(false, Ordering::SeqCst);
+            if stopped {
+                items.push(AgentItem::Notice {
+                    text: "Stopped.".into(),
+                });
+            }
             save_turn(app, korero, run, items, err.clone());
             items.clear();
             *run.turn.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -869,6 +915,12 @@ pub async fn agent_permission(
 pub async fn agent_interrupt(state: State<'_, AppState>, id: String) -> Result<()> {
     let run = state.agents.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
     if let Some(run) = run {
+        // First Stop interrupts the turn. A second Stop (or Stop between
+        // turns) ends the agent, and with it any commands it left running.
+        if run.stopped.swap(true, Ordering::SeqCst) || !run.busy.load(Ordering::SeqCst) {
+            stop(&state, &id);
+            return Ok(());
+        }
         run.write(&json!({"type": "control_request", "request_id": new_id(), "request": {"subtype": "interrupt"}}))
             .await?;
     }
@@ -876,9 +928,26 @@ pub async fn agent_interrupt(state: State<'_, AppState>, id: String) -> Result<(
 }
 
 #[tauri::command]
-pub fn agent_set_mode(state: State<'_, AppState>, id: String, mode: String) -> Result<ConversationView> {
+pub fn agent_set_mode(
+    state: State<'_, AppState>,
+    id: String,
+    mode: String,
+    confirmed: Option<bool>,
+) -> Result<ConversationView> {
     if !MODES.contains(&mode.as_str()) {
         return Err(Error::Invalid("Unknown mode.".into()));
+    }
+    if mode == "auto" {
+        state.with_session(|s| {
+            if !s.settings.auto_acknowledged {
+                if confirmed != Some(true) {
+                    return Err(Error::Invalid("confirm-auto".into()));
+                }
+                s.settings.auto_acknowledged = true;
+                state.store.save_settings(&s.key, &s.settings)?;
+            }
+            Ok(())
+        })?;
     }
     let running = state.agents.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
     if running.as_ref().is_some_and(|r| r.busy.load(Ordering::SeqCst)) {
@@ -890,9 +959,18 @@ pub fn agent_set_mode(state: State<'_, AppState>, id: String, mode: String) -> R
     state.with_session(|s| {
         let mut c = state.store.load_conversation(&s.key, &id)?;
         if let Some(a) = c.agent.as_mut() {
-            a.mode = mode;
+            a.mode = mode.clone();
         }
         state.store.save_conversation(&s.key, &c)?;
+        audit::append(
+            &state.store.audit_path(),
+            audit::Entry {
+                event: "agent-mode".into(),
+                korero: Some(c.id.clone()),
+                detail: Some(mode),
+                ..Default::default()
+            },
+        )?;
         Ok(commands::view_conversation(&c, false))
     })
 }

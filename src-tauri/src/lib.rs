@@ -12,6 +12,7 @@ pub mod audit;
 pub mod commands;
 pub mod crypto;
 pub mod error;
+pub mod guards;
 pub mod model;
 pub mod model_install;
 pub mod providers;

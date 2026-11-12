@@ -77,6 +77,20 @@ async function attempt(fn) {
   }
 }
 
+/// Pātaka's own confirmation dialog: behaves the same on every platform,
+/// and Cancel has the focus, so Enter never confirms by accident.
+function ask(message, okLabel = 'Continue') {
+  return new Promise((resolve) => {
+    const dlg = $('ask-dialog');
+    $('ask-text').textContent = message;
+    $('ask-ok').textContent = okLabel;
+    dlg.returnValue = '';
+    dlg.onclose = () => resolve(dlg.returnValue === 'ok');
+    dlg.showModal();
+    $('ask-cancel').focus();
+  });
+}
+
 function fmtTime(secs) {
   return new Date(secs * 1000).toLocaleString();
 }
@@ -421,7 +435,7 @@ function renderTool(item) {
   const done = item.result !== null && item.result !== undefined;
   const status = !done ? 'running…' : item.isError ? 'failed' : 'done';
   const how = item.decision === 'always' ? ' · always allowed' : item.decision === 'allowed' ? ' · you allowed it'
-    : item.decision === 'denied' ? ' · you declined' : '';
+    : item.decision === 'denied' ? ' · you declined' : item.decision === 'auto mode' ? ' · auto' : '';
   const d = el('details', { class: `tool${item.isError ? ' err' : ''}` },
     el('summary', {},
       el('span', { class: 'tname', text: item.name }),
@@ -440,6 +454,7 @@ function renderPermission(p) {
   });
   return el('div', { class: 'permission', 'data-request': p.requestId },
     el('h4', { text: `The agent wants to ${verb}` }),
+    p.guard ? el('div', { class: 'guard', text: `Pātaka asks because ${p.guard}.` }) : null,
     p.description ? el('div', { class: 'small muted', text: p.description }) : null,
     toolInputView(p.tool, p.input),
     el('div', { class: 'row' },
@@ -546,10 +561,21 @@ listen('agent-notice', (ev) => {
   if (state.current?.id === p.korero) rerenderLast();
 });
 
+const AUTO_CONFIRM = 'The agent will act without asking. Everything it sends is still redacted by Tūmataiti.\n\n'
+  + 'Pātaka still asks before commands that send data off this computer or reach outside the project folder, '
+  + 'keeps placeholders for web and MCP tools, blocks tapu content, and shows and records every tool call. You can stop it at any time.';
+
 $('agent-mode').addEventListener('change', () => attempt(async () => {
+  const mode = $('agent-mode').value;
   try {
-    state.current = await call('agent_set_mode', { id: state.current.id, mode: $('agent-mode').value });
-    toast('Applies from the next message.');
+    try {
+      state.current = await call('agent_set_mode', { id: state.current.id, mode, confirmed: null });
+    } catch (e) {
+      if (e.message !== 'confirm-auto') throw e;
+      if (!(await ask(AUTO_CONFIRM))) return;
+      state.current = await call('agent_set_mode', { id: state.current.id, mode, confirmed: true });
+    }
+    toast(mode === 'auto' ? 'Auto mode applies from the next message. Stop is always available.' : 'Applies from the next message.');
   } finally {
     renderKorero();
   }
@@ -767,7 +793,7 @@ function review(text, providerId, model, preview, previewCmd = 'preview_message'
             text: 'Allow',
             title: 'Send this unchanged in this kōrero',
             onclick: () => attempt(async () => {
-              if (!confirm(`Send “${f.text}” unchanged for the rest of this kōrero?`)) return;
+              if (!(await ask(`Send “${f.text}” unchanged for the rest of this kōrero?`))) return;
               await call('update_conversation', { id: state.current.id, update: { allow: [...state.current.allow, f.text] } });
               await refresh();
             }),
@@ -824,7 +850,7 @@ $('export-json').addEventListener('click', () => attempt(async () => {
 $('delete-korero').addEventListener('click', () => attempt(async () => {
   closeMenu();
   if (!state.current) return;
-  if (!confirm(`Delete “${state.current.title}”? This cannot be undone.`)) return;
+  if (!(await ask(`Delete “${state.current.title}”? This cannot be undone.`))) return;
   await call('delete_conversation', { id: state.current.id });
   state.current = null;
   await refreshList();
@@ -938,7 +964,7 @@ function renderProviders() {
       el('div', { class: 'pinfo' }, el('div', { class: 'pname', text: p.name }), el('div', { class: 'psub', text: bits.join(' · ') })),
       el('button', { text: 'Edit', onclick: () => attempt(() => openConnect(p)) }),
       el('button', { class: 'danger', text: 'Remove', onclick: () => attempt(async () => {
-        if (!confirm(`Remove ${p.name} and anything stored for it, such as its API key?`)) return;
+        if (!(await ask(`Remove ${p.name} and anything stored for it, such as its API key?`))) return;
         state.settings = await call('delete_provider', { providerId: p.id });
         renderProviders();
         fillProviderSelect();
@@ -1172,7 +1198,7 @@ $('model-install').addEventListener('click', () => attempt(async () => {
 }));
 
 $('model-remove').addEventListener('click', () => attempt(async () => {
-  if (!confirm('Remove the name model? Names will then only be caught by your kaitiaki lists.')) return;
+  if (!(await ask('Remove the name model? Names will then only be caught by your kaitiaki lists.'))) return;
   state.model = await call('model_remove');
   renderModel();
   updateRoute();
@@ -1232,7 +1258,7 @@ $('sec-use-pass').addEventListener('click', () => attempt(async () => {
 }));
 
 $('sec-use-keychain').addEventListener('click', () => attempt(async () => {
-  if (!confirm('Move the data key to the OS keychain? Pātaka will then unlock without a passphrase while you are signed in.')) return;
+  if (!(await ask('Move the data key to the OS keychain? Pātaka will then unlock without a passphrase while you are signed in.'))) return;
   await call('vault_change', { mode: 'keychain', passphrase: null });
   state.settings = await call('get_settings');
   renderSettings();
