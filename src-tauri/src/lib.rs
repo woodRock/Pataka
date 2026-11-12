@@ -8,13 +8,14 @@
 
 pub mod agent;
 pub mod commands;
+pub mod mail_settings;
 pub mod state;
 pub mod terminal;
 
 // The engine lives in pataka-core, shared with the `pataka` command.
 pub use pataka_core::{
-    agent_proxy, audit, claude_hooks, crypto, error, guards, model, model_install, providers, redaction, sovereignty,
-    store, student,
+    agent_proxy, audit, claude_hooks, crypto, error, guards, mail, model, model_install, providers, redaction,
+    sovereignty, store, student,
 };
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -84,6 +85,10 @@ pub fn run() {
             agent::agent_permission,
             agent::agent_interrupt,
             agent::agent_set_mode,
+            mail_settings::mail_status,
+            mail_settings::mail_connect,
+            mail_settings::mail_disconnect,
+            mail_settings::mail_register,
             terminal::terminal_status,
             terminal::terminal_install,
             terminal::terminal_remove_hooks,

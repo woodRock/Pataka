@@ -27,6 +27,7 @@
           <label>Again <input type="password" id="setup-pass2" autocomplete="new-password"></label>
           <p class="hint">At least 12 characters. Four unrelated words work well.</p>
         </div>
+        <label class="check setup-model"><input type="checkbox" id="setup-model" checked> Install the Tūmataiti name model (recommended, about 170 MB once). It finds names, iwi and hapū in context. Untick it if you are offline or on a metered connection.</label>
         <button type="submit" class="primary">Set up</button>
       </form>
 
@@ -86,6 +87,12 @@
           </select>
         </div>
       </header>
+
+      <div id="model-banner" class="model-banner hidden" role="status">
+        <span id="model-banner-text"></span>
+        <button type="button" id="model-banner-install" class="primary">Install</button>
+        <button type="button" id="model-banner-hide">Not now</button>
+      </div>
 
       <section id="messages" class="messages" aria-live="polite"></section>
       <div id="empty" class="empty hidden">
@@ -161,6 +168,7 @@
         <button role="tab" data-tab="policy">Tūmataiti</button>
         <button role="tab" data-tab="kaitiaki">Kaitiaki lists</button>
         <button role="tab" data-tab="claudecode">Claude Code</button>
+        <button role="tab" data-tab="mail">Mail</button>
         <button role="tab" data-tab="security">Security &amp; data</button>
         <button role="tab" data-tab="audit">Audit log</button>
         <button role="tab" data-tab="about">Mātāpono</button>
@@ -211,6 +219,28 @@
           <label>Allow unchanged: tūpuna, public figures <textarea id="kt-allow" rows="6" placeholder="names that may be discussed openly in research"></textarea></label>
         </div>
         <button id="save-kaitiaki" class="primary">Save</button>
+      </section>
+
+      <section data-panel="mail" class="panel hidden">
+        <h3>Pātaka Mail</h3>
+        <p class="muted">Let Claude read and organise your mailbox: search, read, label, archive and draft replies. Every email is redacted by Tūmataiti before Claude sees it. Pātaka Mail never sends an email or deletes one for good, and every change can be undone with <code>pataka mail undo</code>. Once a mailbox is connected, agent kōrero in this app and <code>pataka claude</code> get the mail tools.</p>
+        <div id="mail-status" class="status-box"></div>
+        <form id="mail-form" class="hidden">
+          <label>Email address <input type="email" id="mail-email" autocomplete="email" spellcheck="false"></label>
+          <label>IMAP server <input id="mail-host" placeholder="imap.gmail.com" autocomplete="off" spellcheck="false"></label>
+          <label>App password <input type="password" id="mail-pass" autocomplete="off"></label>
+          <p class="hint">Use an <strong>app password</strong>, not your normal password. For Gmail, turn on 2-Step Verification, then create one at myaccount.google.com/apppasswords. Leave the server empty for Gmail. Pātaka checks the login with the server, then keeps the password encrypted on this computer.</p>
+          <div class="row"><button type="submit" id="mail-connect" class="primary">Connect</button></div>
+        </form>
+        <div id="mail-connected" class="hidden">
+          <h4>Every Claude Code</h4>
+          <p id="mail-register-hint" class="hint"></p>
+          <div class="row">
+            <button type="button" id="mail-register" class="primary">Offer it to every Claude Code</button>
+            <button type="button" id="mail-unregister">Stop offering it</button>
+            <button type="button" id="mail-disconnect" class="danger">Disconnect</button>
+          </div>
+        </div>
       </section>
 
       <section data-panel="claudecode" class="panel hidden">

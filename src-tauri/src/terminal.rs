@@ -22,7 +22,7 @@ fn exe_name() -> &'static str {
 
 /// The copy of `pataka` that ships next to the app's own executable, as
 /// `pataka-cli` (so it never clashes with a `pataka` already on the PATH).
-fn bundled() -> Option<PathBuf> {
+pub(crate) fn bundled() -> Option<PathBuf> {
     let name = if cfg!(windows) { "pataka-cli.exe" } else { "pataka-cli" };
     let p = std::env::current_exe().ok()?.parent()?.join(name);
     let ok = std::fs::metadata(&p).map(|m| m.len() > 1024).unwrap_or(false);
@@ -38,6 +38,11 @@ fn install_dir() -> Result<PathBuf> {
         let home = std::env::var_os("HOME").ok_or_else(|| Error::Invalid("HOME is not set.".into()))?;
         Ok(PathBuf::from(home).join(".local").join("bin"))
     }
+}
+
+/// Where the installed `pataka` command is (or would be).
+pub(crate) fn installed_path() -> Option<PathBuf> {
+    install_dir().ok().map(|d| d.join(exe_name()))
 }
 
 fn on_path(dir: &std::path::Path) -> bool {

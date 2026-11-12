@@ -220,6 +220,11 @@ $('setup-form').addEventListener('submit', async (e) => {
     $('setup-pass1').value = '';
     $('setup-pass2').value = '';
     await enterApp();
+    // Ticked by default: without the name model, names are only caught
+    // from the kaitiaki lists. It downloads in the background.
+    if ($('setup-model').checked && state.model?.supported && !state.model.installed) {
+      installModel().catch((err) => toast(err.message, true));
+    }
   } catch (err) {
     $('lock-error').textContent = err.message;
   }
@@ -244,6 +249,7 @@ async function enterApp() {
   state.lastActivity = Date.now();
   state.settings = await call('get_settings');
   state.model = await call('model_status');
+  renderModelBanner();
   fillProviderSelect();
   await refreshList();
   if (state.list.length) await openKorero(state.list[0].id);
@@ -896,6 +902,7 @@ for (const tab of document.querySelectorAll('.tabs button')) {
     for (const p of document.querySelectorAll('.panel')) p.classList.toggle('hidden', p.dataset.panel !== tab.dataset.tab);
     if (tab.dataset.tab === 'audit') attempt(loadAudit);
     if (tab.dataset.tab === 'claudecode') attempt(loadTerminal);
+    if (tab.dataset.tab === 'mail') attempt(loadMail);
   });
 }
 
@@ -1180,11 +1187,43 @@ function renderModel() {
   $('model-install').classList.toggle('hidden', !m.supported || m.installed);
   $('model-install').disabled = m.installing;
   $('model-remove').classList.toggle('hidden', !m.installed);
+  renderModelBanner();
 }
 
-$('model-install').addEventListener('click', () => attempt(async () => {
+// A banner while names can only be caught from the kaitiaki lists: the
+// name model is not installed, is downloading, or cannot run here.
+function renderModelBanner() {
+  const m = state.model;
+  const banner = $('model-banner');
+  const text = $('model-banner-text');
+  let show = false;
+  let canInstall = false;
+  if (!m || m.installed) {
+    show = false;
+  } else if (state.modelDownload) {
+    show = true;
+    text.textContent = `Installing the Tūmataiti name model: ${state.modelDownload}. Until it is ready, names are only caught from your kaitiaki lists.`;
+  } else if (!m.supported) {
+    let seen = false;
+    try { seen = localStorage.getItem('pataka.modelUnsupportedSeen') === '1'; } catch { /* display preference only */ }
+    show = !seen;
+    text.textContent = 'The name model cannot run on this computer (ONNX Runtime has no build for it), so names, addresses and iwi are only caught when they are on your kaitiaki lists.';
+  } else {
+    show = !state.modelBannerHidden;
+    canInstall = true;
+    text.textContent = `Names, addresses and iwi are only caught when they are on your kaitiaki lists. Install the Tūmataiti name model (about ${mb(m.downloadBytes)}, once) to find them in context.`;
+  }
+  banner.classList.toggle('hidden', !show);
+  $('model-banner-install').classList.toggle('hidden', !canInstall);
+  $('model-banner-hide').classList.toggle('hidden', !!state.modelDownload);
+}
+
+// Download and check the name model, from Settings, the banner or first run.
+async function installModel() {
   $('model-install').disabled = true;
   $('model-progress').textContent = 'Starting…';
+  state.modelDownload = 'starting';
+  renderModelBanner();
   try {
     state.model = await call('model_install');
     $('model-progress').textContent = 'Installed and checked.';
@@ -1193,11 +1232,22 @@ $('model-install').addEventListener('click', () => attempt(async () => {
     $('model-progress').textContent = '';
     throw e;
   } finally {
+    state.modelDownload = null;
     state.model = await call('model_status');
     renderModel();
     updateRoute();
   }
-}));
+}
+
+$('model-install').addEventListener('click', () => attempt(installModel));
+$('model-banner-install').addEventListener('click', () => attempt(installModel));
+$('model-banner-hide').addEventListener('click', () => {
+  if (state.model && !state.model.supported) {
+    try { localStorage.setItem('pataka.modelUnsupportedSeen', '1'); } catch { /* display preference only */ }
+  }
+  state.modelBannerHidden = true;
+  renderModelBanner();
+});
 
 $('model-remove').addEventListener('click', () => attempt(async () => {
   if (!(await ask('Remove the name model? Names will then only be caught by your kaitiaki lists.'))) return;
@@ -1209,6 +1259,9 @@ $('model-remove').addEventListener('click', () => attempt(async () => {
 listen('model-progress', (ev) => {
   const p = ev.payload;
   $('model-progress').textContent = `Downloading ${p.stage}: ${mb(p.done)} of ${mb(p.total)}`;
+  if (state.model?.installed) return;
+  state.modelDownload = `${p.stage}, ${mb(p.done)} of ${mb(p.total)}`;
+  renderModelBanner();
 });
 
 $('save-policy').addEventListener('click', () => attempt(async () => {
@@ -1313,6 +1366,79 @@ $('cc-install').addEventListener('click', () => attempt(async () => {
 $('cc-remove-hooks').addEventListener('click', () => attempt(async () => {
   if (!(await ask('Remove Pātaka\'s hooks from Claude Code? The pataka command stays installed.', 'Remove'))) return;
   renderTerminal(await call('terminal_remove_hooks'));
+}));
+
+// ------------------------------------------------------------ Pātaka Mail
+
+function renderMail(st) {
+  const box = $('mail-status');
+  box.className = `status-box ${st.connected ? 'ok' : ''}`;
+  if (st.connected) {
+    const port = st.port === 993 ? '' : `:${st.port}`;
+    box.replaceChildren(
+      el('div', { text: `Connected: ${st.email} on ${st.host}${port}.` }),
+      el('div', { text: st.registered
+        ? 'Offered to agent kōrero, pataka claude, and every Claude Code session, including the Claude desktop app\'s Code tab.'
+        : 'Offered to agent kōrero in this app and to pataka claude.' }));
+  } else {
+    box.replaceChildren(el('div', { text: 'No mailbox is connected.' }));
+  }
+  show('mail-form', !st.connected);
+  show('mail-connected', st.connected);
+  show('mail-register', st.connected && !st.registered);
+  show('mail-unregister', st.connected && st.registered);
+  $('mail-register').disabled = !st.serviceInstalled || !st.canRegister;
+  $('mail-register-hint').textContent = st.registered
+    ? 'Plain claude in a terminal and the Claude desktop app\'s Code tab reach your mailbox through the Pātaka service. It must be running and unlocked.'
+    : !st.canRegister
+      ? 'To offer it to every Claude Code session, first install the pataka command in Settings → Claude Code.'
+      : !st.serviceInstalled
+        ? 'To offer it to every Claude Code session, including the Claude desktop app\'s Code tab, first install the Pātaka service from a terminal: pataka service install'
+        : 'Offer it to every Claude Code session too, including plain claude in a terminal and the Claude desktop app\'s Code tab.';
+}
+
+async function loadMail() {
+  renderMail(await call('mail_status'));
+}
+
+$('mail-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  attempt(async () => {
+    const btn = $('mail-connect');
+    btn.disabled = true;
+    btn.textContent = 'Checking the login…';
+    try {
+      const st = await call('mail_connect', {
+        email: $('mail-email').value,
+        host: $('mail-host').value,
+        password: $('mail-pass').value,
+      });
+      $('mail-pass').value = '';
+      renderMail(st);
+      toast('Mailbox connected.');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Connect';
+    }
+  });
+});
+
+$('mail-register').addEventListener('click', () => attempt(async () => {
+  const msg = 'Pātaka will add pataka-mail to Claude Code\'s MCP servers (~/.claude.json), served by the Pātaka service on this computer. '
+    + 'It also switches off claude.ai connectors such as Gmail in Claude Code, because they read mail on Anthropic\'s side, unredacted.';
+  if (!(await ask(msg, 'Offer it'))) return;
+  renderMail(await call('mail_register', { on: true }));
+  toast('Every Claude Code session now has your mailbox, redacted.');
+}));
+
+$('mail-unregister').addEventListener('click', () => attempt(async () => {
+  renderMail(await call('mail_register', { on: false }));
+}));
+
+$('mail-disconnect').addEventListener('click', () => attempt(async () => {
+  if (!(await ask('Disconnect the mailbox? Pātaka forgets the app password. You can also revoke it in your account settings.', 'Disconnect'))) return;
+  renderMail(await call('mail_disconnect'));
+  toast('Mailbox disconnected.');
 }));
 
 async function loadAudit() {
