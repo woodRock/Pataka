@@ -394,6 +394,7 @@ mod tests {
             vault: Default::default(),
             terms: vec![],
             allow: vec![],
+            agent: None,
         };
         s.save_conversation(&k, &c).unwrap();
         let raw = fs::read(s.conv_path(&id)).unwrap();

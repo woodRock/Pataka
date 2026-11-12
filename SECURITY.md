@@ -40,6 +40,20 @@ Files are written atomically (temporary file, then rename) with owner-only permi
 - Detected spans are cached in memory by text hash to avoid re-running the model over the history. The cache is dropped on lock.
 - On macOS, loading a library that was not signed with Pātaka needs the `com.apple.security.cs.disable-library-validation` entitlement (`src-tauri/Entitlements.plist`). The hash check before loading stands in for Apple's library validation.
 
+### Agents (Claude Code in a project folder)
+
+Agent kōrero run Claude Code as a full agent in a folder the person chooses (not their home folder or a drive root). Pātaka sits between Claude Code and the model:
+
+- **Tūmataiti proxy.** Claude Code is started with `ANTHROPIC_BASE_URL` set to a proxy inside Pātaka, listening on 127.0.0.1 only, under a random path per session. Only the Messages API (and token counting) is forwarded; GETs pass through unchanged, and every other request is refused. The proxy refuses everything while Pātaka is locked.
+- **Outbound.** Every request is redacted with the kōrero's placeholder vault: the system prompt, all messages, tool results (file contents, command output) and the arguments of earlier tool calls. The account name that appears in paths is treated as a name. Images and documents are withheld. "Block" actions become "mask" for content the agent read (a secret in a `.env` file is masked rather than ending the session), but tapu terms stop the request. The name model is not applied to the agent's own instructions or to code-like tokens such as paths, where it produces false matches; the rules, kaitiaki lists and identity terms still apply there.
+- **Inbound.** Placeholders are restored in streamed text and in tool arguments, after each tool call is complete, so split placeholders are handled. Arguments are restored only for tools that act on this computer (Bash, Read, Write, Edit, MultiEdit, NotebookEdit, Glob, Grep, LS, TodoWrite, Task). WebFetch, MCP tools and any unknown tool keep their placeholders, so a restored value is never handed to a network tool.
+- **Approvals.** Claude Code's permission prompts are answered by Pātaka through its SDK control protocol: the person sees the exact command or diff, with real values, and allows or denies it. Permission modes are limited to ask, accept edits and plan; `bypassPermissions` is never used. "Always allow" lasts only for that session.
+- **Background traffic.** `DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`, `DISABLE_AUTOUPDATER` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` are set for agent processes.
+- **One agent per kōrero.** A second send while one is starting is refused. Locking Pātaka, wiping data or deleting the kōrero stops the agent and closes its proxy session.
+- **Audit.** Each request through the proxy is logged with counts per category and how many images were withheld. Each message sent to an agent is logged too.
+
+Limits: Claude Code stores its own session transcripts locally, unencrypted (`~/.claude/projects`). Hooks and MCP servers from the person's Claude Code settings still run, and their own network traffic bypasses Pātaka. An approved shell command runs with real values and could send them over the network.
+
 ### Subscriptions through Claude Code and Codex
 
 Pātaka can use a Claude or ChatGPT subscription by running the vendor's own signed-in command-line app (`claude` or `codex`), the way T3 Code does. Pātaka never handles that login; the app keeps its own credentials. Each message starts a fresh run:
@@ -69,6 +83,9 @@ Pātaka can use a Claude or ChatGPT subscription by running the vendor's own sig
 | Threat | Mitigation |
 |---|---|
 | A cloud provider logs or retains prompts | Only Tūmataiti-redacted text leaves the device. Tapu kōrero only go to on-device or sovereign providers. |
+| An agent's file contents or command output reach the model | All agent traffic goes through the local Tūmataiti proxy and is redacted; images are withheld |
+| An agent sends a restored value to the network | Only local tools get restored arguments; web and MCP tools keep placeholders; commands need approval |
+| Another local program uses the agent proxy | Bound to 127.0.0.1, random per-session path, closed when the session ends or Pātaka locks |
 | A subscription app (coding agent) acts on the computer | Claude Code runs with no tools; Codex runs read-only and is stopped as soon as it starts an action |
 | Missed personal data (false negatives) | Checksum-validated rules, the Tūmataiti name model, kaitiaki lists, a review step that shows the full outbound text, and fail-closed blocking for secrets and tapu terms |
 | Tampered model or runtime files | Pinned SHA-256 for every file, checked at download and at every load |

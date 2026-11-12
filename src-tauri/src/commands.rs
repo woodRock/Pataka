@@ -93,6 +93,7 @@ pub struct ConversationView {
     /// a message were replaced before it left the device. Stays local.
     redactions: BTreeMap<String, String>,
     streaming: bool,
+    agent: Option<AgentInfo>,
 }
 
 #[derive(Serialize)]
@@ -121,6 +122,55 @@ pub struct Preview {
     model_used: bool,
 }
 
+impl Preview {
+    /// The check of a message going to an agent: only the new text, because
+    /// the proxy redacts everything else the agent sends.
+    pub(crate) fn for_agent(
+        provider: &Provider,
+        model: &str,
+        out: redaction::Outcome,
+        reasons: Vec<String>,
+        needs_review: bool,
+        model_used: bool,
+    ) -> Preview {
+        let blocked = !reasons.is_empty();
+        Preview {
+            destination: Destination {
+                provider_id: provider.id.clone(),
+                name: provider.name.clone(),
+                model: model.to_string(),
+                jurisdiction: provider.jurisdiction.clone(),
+                trust: sovereignty::effective_trust(provider),
+            },
+            leaves_device: true,
+            redacted: true,
+            outbound: if blocked { String::new() } else { out.output },
+            findings: out.findings,
+            blocked,
+            block_reasons: reasons,
+            history_findings: 0,
+            needs_review,
+            model_used,
+        }
+    }
+
+    pub(crate) fn blocked(&self) -> bool {
+        self.blocked
+    }
+
+    pub(crate) fn reasons(&self) -> &[String] {
+        &self.block_reasons
+    }
+
+    pub(crate) fn needs_review(&self) -> bool {
+        self.needs_review
+    }
+
+    pub(crate) fn outbound(&self) -> &str {
+        &self.outbound
+    }
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct StreamPayload {
@@ -137,7 +187,7 @@ struct StreamPayload {
 
 // ---------------------------------------------------------------- helpers
 
-fn view_conversation(c: &Conversation, streaming: bool) -> ConversationView {
+pub(crate) fn view_conversation(c: &Conversation, streaming: bool) -> ConversationView {
     ConversationView {
         id: c.id.clone(),
         title: c.title.clone(),
@@ -158,6 +208,7 @@ fn view_conversation(c: &Conversation, streaming: bool) -> ConversationView {
         placeholders: c.vault.placeholders.len(),
         redactions: c.vault.placeholders.clone(),
         streaming,
+        agent: c.agent.clone(),
     }
 }
 
@@ -420,7 +471,7 @@ fn prepare(
     Ok((preview, built))
 }
 
-fn check_text(text: &str) -> Result<()> {
+pub(crate) fn check_text(text: &str) -> Result<()> {
     if text.trim().is_empty() {
         return Err(Error::Invalid("Type a message first.".into()));
     }
@@ -520,6 +571,7 @@ pub async fn vault_unlock(state: State<'_, AppState>, passphrase: Option<String>
 #[tauri::command]
 pub fn vault_lock(state: State<'_, AppState>) -> Result<()> {
     state.cancel_all_streams();
+    crate::agent::stop_all(&state);
     // Dropping the session zeroes the data key and API keys; dropping the
     // model forgets its cache of spans, which contain text from kōrero.
     *state.session() = None;
@@ -558,6 +610,7 @@ pub fn wipe_everything(state: State<'_, AppState>, confirm: String) -> Result<()
         return Err(Error::Invalid("Type MUKU to confirm.".into()));
     }
     state.cancel_all_streams();
+    crate::agent::stop_all(&state);
     *state.session() = None;
     state.drop_student();
     let _ = model_install::remove(state.store.root());
@@ -881,6 +934,7 @@ pub fn create_conversation(state: State<'_, AppState>, classification: Classific
             vault: Vault::default(),
             terms: Vec::new(),
             allow: Vec::new(),
+            agent: None,
         };
         state.store.save_conversation(&s.key, &c)?;
         Ok(view_conversation(&c, false))
@@ -942,6 +996,7 @@ pub fn delete_conversation(state: State<'_, AppState>, id: String) -> Result<()>
     if let Some(n) = state.streams().remove(&id) {
         n.notify_one();
     }
+    crate::agent::stop(&state, &id);
     state.with_session(|_| Ok(()))?;
     state.store.delete_conversation(&id)?;
     audit::append(
@@ -1075,6 +1130,7 @@ pub async fn send_message(
             trust: Some(trust),
             notice: None,
             error: None,
+            items: Vec::new(),
         });
         let assistant_id = new_id();
         c.messages.push(Message {
@@ -1089,6 +1145,7 @@ pub async fn send_message(
             trust: Some(trust),
             notice: None,
             error: None,
+            items: Vec::new(),
         });
         c.vault = built.vault.clone();
         c.updated_at = t;
@@ -1396,6 +1453,7 @@ mod tests {
             vault: Vault::default(),
             terms: vec![],
             allow: vec![],
+            agent: None,
         }
     }
 
@@ -1412,6 +1470,7 @@ mod tests {
             trust,
             notice: None,
             error: None,
+            items: Vec::new(),
         }
     }
 

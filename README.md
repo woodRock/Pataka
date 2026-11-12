@@ -8,6 +8,7 @@ Built with Rust and [Tauri 2](https://tauri.app). The window is plain HTML, CSS 
 
 ## What it does
 
+- **An agent in your project, like Claude Code or T3 Code.** Start **+ Agent in a folder** and the agent reads and edits files, runs commands and fixes bugs there, using Claude Code with your Claude subscription or Anthropic API key. Unlike running Claude Code directly, every request it makes to the model passes through a **Tūmataiti proxy on your computer**: your messages, file contents, command output and its own earlier tool calls are redacted first, and the placeholders are filled back in on your computer before any tool runs. You approve commands and file changes in Pātaka. Tapu content stops the request, and network and MCP tools never receive real values.
 - **Use your subscription, or an API key.** Like [T3 Code](https://github.com/pingdotgg/t3code), Pātaka can run the official Claude Code and Codex apps you are already signed in to, so a Claude Pro/Max or ChatGPT plan works without an API key. Pātaka never sees that login. It sends the apps only Tūmataiti-redacted text and runs them locked down for chat: Claude Code with no tools, MCP servers, settings or saved sessions, and Codex in a read-only sandbox that Pātaka stops if Codex tries to act on the computer.
 - **Local redaction with Tūmataiti, rules and model.** The Tūmataiti rules find IRD numbers (mod-11 checked), NHI numbers, bank accounts, payment cards (Luhn checked), passports and driver licences, NZ phone numbers, emails, URLs, IP addresses, labelled dates of birth or death, and API keys or passwords. The **Tūmataiti name model** (DeBERTa-v3-small, fine-tuned on NZ and te reo Māori text) finds people's names, addresses and affiliation (iwi, hapū, marae) in context. It runs natively on your device through ONNX Runtime. **Kaitiaki lists** that you or your data steward maintain add names, places and tapu terms. Everything is merged by Tūmataiti's own review and merge steps. Each item is pseudonymised (`[PERSON_1]`), generalised (`[YEAR 1984]`), masked (`[NZ_GOV_ID]`) or blocked, per a policy you control.
 - **Consistent placeholders across a kōrero.** The same person keeps the same placeholder across every turn. When a message goes to the cloud, the whole history is redacted again under the current policy, so a term added later also protects earlier turns.
@@ -78,6 +79,28 @@ Each script copies its output into `release/<platform>/` and refreshes `release/
 
 Linux and Windows have no CI, so run `scripts/install-hooks.sh` once. It adds a git pre-push hook that runs `scripts/check.sh` before every push. (The macOS workflow runs the same checks before it builds.)
 
+## Agents
+
+An agent kōrero runs Claude Code in the folder you choose, the way T3 Code drives it, with Pātaka in the middle:
+
+```
+ you ── Pātaka ── Claude Code (in your folder) ── Tūmataiti proxy (127.0.0.1) ── Anthropic
+                       ▲  tools run here,              redacts every request,
+                       │  with real values             restores every reply
+                       └── approvals in Pātaka
+```
+
+- **What leaves your computer:** only redacted text. The proxy redacts the system prompt (with your account name in paths replaced), your messages, file contents and command output in tool results, and the arguments of earlier tool calls. Images and PDFs are withheld, because they cannot be checked. Secrets the agent reads, such as an API key in a `.env` file, are masked. Tapu terms stop the request.
+- **What comes back:** placeholders are restored in the reply and in the arguments of tools that act only on your computer (Bash, Read, Write, Edit, Grep, Glob and the like), so files get the real names. Web fetches, MCP tools and unknown tools keep their placeholders.
+- **Approvals:** *Ask before acting* (default), *Allow file edits, ask for commands*, or *Plan only*. Bypassing permissions is not offered. Each request shows the exact command or diff, with real values, and *Always allow* lasts only for that session.
+- **Claude Code's own background traffic** (telemetry, error reports, update checks) is switched off for agent sessions.
+
+Limits:
+- Claude Code keeps its own session history on your computer (in `~/.claude/projects`), unencrypted and with real values. That is the same as using Claude Code directly, and it stays on your computer.
+- Hooks and MCP servers configured in your Claude Code settings still run. Their own network traffic does not pass through Pātaka, though they never receive values restored by Pātaka.
+- A command you approve runs with real values. A command that uses the network, such as `curl`, could send them somewhere, so read commands before allowing them.
+- Codex is not yet available as an agent engine. Its sign-in and API need a different proxy.
+
 ## Layout
 
 ```
@@ -92,6 +115,8 @@ src-tauri/src/
   providers/       Anthropic and OpenAI-compatible streaming clients (the only network code),
                    and cli.rs, which runs the signed-in Claude Code or Codex app for subscriptions
   commands.rs      what the window may call
+  agent.rs         agent kōrero: runs Claude Code in a folder, relays tools and approvals
+  agent_proxy/     the Tūmataiti proxy agents talk through (redact out, restore in)
 ui/                window: index.html, styles.css, app.js, markdown.js (safe, DOM-only renderer)
 scripts/           build, checksum, check and hook scripts
 release/           committed Linux and Windows installers and SHA256SUMS

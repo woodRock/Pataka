@@ -108,7 +108,7 @@ pub fn locate(kind: ProviderKind, configured: Option<&str>) -> Option<PathBuf> {
 /// A command for `exe` that also works when it is a Node script started from
 /// a desktop app with a short PATH: its own directory and the usual install
 /// locations are put on PATH.
-fn command(exe: &Path) -> Command {
+pub fn command(exe: &Path) -> Command {
     let mut cmd = Command::new(exe);
     let mut dirs = vec![exe.parent().map(Path::to_path_buf).unwrap_or_default()];
     dirs.extend(search_dirs());

@@ -46,6 +46,7 @@
         <button id="new-noa" class="primary" title="General kōrero: any model, redacted before it leaves the device">+ Kōrero hou</button>
         <button id="new-tapu" class="tapu-btn" title="Restricted kōrero: only on-device or sovereign models">+ Tapu</button>
       </div>
+      <button id="new-agent" class="agent-btn" title="An agent that reads, edits and runs commands in a project folder, with every request redacted by Tūmataiti">+ Agent in a folder</button>
       <nav id="korero-list" class="korero-list" aria-label="Kōrero"></nav>
       <div class="sidebar-foot">
         <button id="open-settings">Settings</button>
@@ -76,6 +77,12 @@
           <select id="provider-select" aria-label="Provider"></select>
           <select id="model-select" aria-label="Model"></select>
           <span id="destination" class="badge"></span>
+          <span id="agent-folder" class="badge folder hidden"></span>
+          <select id="agent-mode" class="hidden" aria-label="How the agent asks">
+            <option value="manual">Ask before acting</option>
+            <option value="acceptEdits">Allow file edits, ask for commands</option>
+            <option value="plan">Plan only, change nothing</option>
+          </select>
         </div>
       </header>
 
@@ -84,6 +91,13 @@
         <h2>Kia ora</h2>
         <p>Start a kōrero. Before anything leaves this device, Tūmataiti finds NZ identifiers (IRD, NHI, bank accounts, cards, passports, licences), contact details, secrets, the names and places on your kaitiaki lists and, with the name model installed, people's names, addresses and affiliation in context. It replaces them with placeholders, and replies are restored here, on your device.</p>
         <p class="muted">Mark a kōrero <strong>Tapu</strong> to keep it to models on this device (for example Ollama) or on infrastructure you have marked sovereign.</p>
+      </div>
+
+      <div id="empty-agent" class="empty hidden">
+        <h2>Agent</h2>
+        <p>Ask the agent to work in this folder: read and change files, run commands, fix bugs. It runs on Claude Code with your sign-in or API key.</p>
+        <p>Every request it makes to the model goes through Tūmataiti on this computer first: file contents, command output and your messages are redacted, and placeholders are filled back in before any tool runs here. Tapu content stops the request.</p>
+        <p class="muted">It asks before running commands or changing files, unless you choose otherwise above. Network and MCP tools never receive real values.</p>
       </div>
 
       <form id="composer" class="composer">

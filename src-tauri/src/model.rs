@@ -192,6 +192,51 @@ pub struct Message {
     pub notice: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Agent replies: text, tool calls and their results, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<AgentItem>,
+}
+
+/// One step of an agent's turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum AgentItem {
+    Text {
+        text: String,
+    },
+    Tool {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+        #[serde(default)]
+        result: Option<String>,
+        #[serde(default)]
+        is_error: bool,
+        /// "allowed", "denied", "auto" (needed no approval) or "always".
+        #[serde(default)]
+        decision: Option<String>,
+    },
+    Notice {
+        text: String,
+    },
+}
+
+/// A kōrero where the model works as an agent in a folder on this computer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInfo {
+    /// The project folder the agent works in.
+    pub workspace: String,
+    /// Claude Code's session, so the agent can carry on after a restart.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// "manual" (ask before acting), "acceptEdits" or "plan".
+    #[serde(default = "default_mode")]
+    pub mode: String,
+}
+
+fn default_mode() -> String {
+    "manual".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +257,9 @@ pub struct Conversation {
     /// Extra terms allowed through in this kōrero only.
     #[serde(default)]
     pub allow: Vec<String>,
+    /// Set for agent kōrero.
+    #[serde(default)]
+    pub agent: Option<AgentInfo>,
 }
 
 pub fn now() -> i64 {

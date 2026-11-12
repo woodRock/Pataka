@@ -26,6 +26,12 @@ pub struct AppState {
     /// The Tūmataiti name model, loaded on first use.
     pub student: Mutex<Option<Arc<Student>>>,
     pub installing: std::sync::atomic::AtomicBool,
+    /// Running agents, by kōrero id.
+    pub agents: Mutex<HashMap<String, Arc<crate::agent::Running>>>,
+    /// The Tūmataiti proxy agents talk through, started on first use.
+    pub proxy: Mutex<Option<Arc<crate::agent_proxy::Proxy>>>,
+    /// Kōrero whose agent is being started or sent to right now.
+    pub agent_launching: Mutex<std::collections::HashSet<String>>,
 }
 
 impl AppState {
@@ -38,6 +44,9 @@ impl AppState {
             failed_unlocks: Mutex::new(0),
             student: Mutex::new(None),
             installing: std::sync::atomic::AtomicBool::new(false),
+            agents: Mutex::new(HashMap::new()),
+            proxy: Mutex::new(None),
+            agent_launching: Mutex::new(std::collections::HashSet::new()),
         }
     }
 

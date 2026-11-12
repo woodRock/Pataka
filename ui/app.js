@@ -42,6 +42,9 @@ const state = {
   // Show real values in place of placeholders. A per-device display
   // preference only; it holds no kōrero content.
   reveal: (() => { try { return localStorage.getItem('pataka.reveal') === '1'; } catch { return false; } })(),
+  permissions: {}, // agent permission requests waiting, by kōrero
+  agentNote: {}, // last proxy summary, by kōrero
+  providerFilter: false,
 };
 
 // ------------------------------------------------------------ utilities
@@ -258,6 +261,17 @@ async function newKorero(classification) {
 
 $('new-noa').addEventListener('click', () => attempt(() => newKorero('noa')));
 $('new-tapu').addEventListener('click', () => attempt(() => newKorero('tapu')));
+$('new-agent').addEventListener('click', () => attempt(async () => {
+  const c = await call('agent_create', { workspace: null });
+  if (!c) return;
+  await refreshList();
+  await openKorero(c.id);
+  if (!state.settings.providers.some(isAgentProvider)) {
+    toast('Agents run on Claude Code: connect your Claude subscription or an Anthropic API key.');
+    await openConnect();
+  }
+  $('input').focus();
+}));
 $('lock-now').addEventListener('click', () => attempt(lockNow));
 
 async function lockNow() {
@@ -276,6 +290,7 @@ function showEmpty() {
   $('messages').replaceChildren();
   $('messages').classList.add('hidden');
   $('empty').classList.remove('hidden');
+  $('empty-agent').classList.add('hidden');
   $('korero-title').value = '';
   $('korero-title').disabled = true;
   for (const b of document.querySelectorAll('.class-toggle button')) b.classList.remove('on');
@@ -292,11 +307,20 @@ async function openKorero(id) {
 function renderKorero() {
   const c = state.current;
   if (!c) return showEmpty();
-  $('empty').classList.toggle('hidden', c.messages.length > 0);
+  $('empty').classList.toggle('hidden', c.messages.length > 0 || !!c.agent);
+  $('empty-agent').classList.toggle('hidden', c.messages.length > 0 || !c.agent);
   $('messages').classList.toggle('hidden', c.messages.length === 0);
   $('korero-title').disabled = false;
   $('korero-title').value = c.title;
   for (const b of document.querySelectorAll('.class-toggle button')) b.classList.toggle('on', b.dataset.cls === c.classification);
+  show('agent-folder', !!c.agent);
+  show('agent-mode', !!c.agent);
+  if (c.agent) {
+    $('agent-folder').textContent = c.agent.workspace;
+    $('agent-folder').title = `The agent works in ${c.agent.workspace}`;
+    $('agent-mode').value = c.agent.mode;
+  }
+  if (state.settings && state.providerFilter !== !!c.agent) fillProviderSelect();
   const box = $('messages');
   box.replaceChildren(...c.messages.map(renderMessage));
   updateRevealToggle();
@@ -328,6 +352,8 @@ function renderMessage(m) {
     const n = sent ? countPlaceholders(m.outbound) : 0;
     if (n) meta.append(el('span', { class: 'redacted-note', text: `${n} item${n === 1 ? '' : 's'} replaced before sending` }));
     wrap.append(meta);
+  } else if (state.current?.agent) {
+    wrap.append(renderAgentReply(m));
   } else {
     const bubble = el('div', { class: 'bubble' });
     const streaming = state.streaming.has(state.current?.id) && !m.text && !m.error && isLast(m);
@@ -361,6 +387,173 @@ function updateStreamingUi() {
   $('stop').classList.toggle('hidden', !busy);
   $('send').disabled = !!busy || !state.current;
 }
+
+// ------------------------------------------------------------ agents
+
+const TOOL_VERB = {
+  Bash: 'run a command', Write: 'create a file', Edit: 'edit a file', MultiEdit: 'edit a file',
+  NotebookEdit: 'edit a notebook', WebFetch: 'fetch a web page', WebSearch: 'search the web',
+};
+
+function toolArg(name, input) {
+  if (!input || typeof input !== 'object') return '';
+  return input.command || input.file_path || input.notebook_path || input.pattern || input.url || input.query
+    || input.description || JSON.stringify(input).slice(0, 120);
+}
+
+function toolInputView(name, input) {
+  if ((name === 'Edit' || name === 'MultiEdit') && input) {
+    const edits = name === 'Edit' ? [input] : input.edits || [];
+    const pre = el('pre');
+    pre.append(el('div', { text: input.file_path || '' }));
+    for (const e of edits) {
+      for (const l of String(e.old_string ?? '').split('\n')) pre.append(el('div', { class: 'diff-del', text: `- ${l}` }));
+      for (const l of String(e.new_string ?? '').split('\n')) pre.append(el('div', { class: 'diff-add', text: `+ ${l}` }));
+    }
+    return pre;
+  }
+  if (name === 'Bash' && input?.command) return el('pre', { text: `$ ${input.command}` });
+  if (name === 'Write' && input) return el('pre', { text: `${input.file_path}\n\n${input.content ?? ''}` });
+  return el('pre', { text: JSON.stringify(input, null, 2) });
+}
+
+function renderTool(item) {
+  const done = item.result !== null && item.result !== undefined;
+  const status = !done ? 'running…' : item.isError ? 'failed' : 'done';
+  const how = item.decision === 'always' ? ' · always allowed' : item.decision === 'allowed' ? ' · you allowed it'
+    : item.decision === 'denied' ? ' · you declined' : '';
+  const d = el('details', { class: `tool${item.isError ? ' err' : ''}` },
+    el('summary', {},
+      el('span', { class: 'tname', text: item.name }),
+      el('span', { class: 'targ', text: toolArg(item.name, item.input) }),
+      el('span', { class: 'tstate', text: status + how })),
+    toolInputView(item.name, item.input));
+  if (done) d.append(el('pre', { text: item.result || '(no output)' }));
+  return d;
+}
+
+function renderPermission(p) {
+  const verb = TOOL_VERB[p.tool] || `use ${p.tool}`;
+  const answer = (decision) => attempt(async () => {
+    await call('agent_permission', { id: state.current.id, requestId: p.requestId, decision });
+    removePermission(p.requestId);
+  });
+  return el('div', { class: 'permission', 'data-request': p.requestId },
+    el('h4', { text: `The agent wants to ${verb}` }),
+    p.description ? el('div', { class: 'small muted', text: p.description }) : null,
+    toolInputView(p.tool, p.input),
+    el('div', { class: 'row' },
+      el('button', { class: 'primary', text: 'Allow', onclick: () => answer('allow') }),
+      el('button', { text: `Always allow ${p.tool} in this session`, onclick: () => answer('always') }),
+      el('button', { class: 'danger', text: 'Deny', onclick: () => answer('deny') })));
+}
+
+function renderAgentReply(m) {
+  const box = el('div', { class: 'agent-items' });
+  const items = m.items || [];
+  const last = isLast(m);
+  for (const it of items) {
+    if (it.kind === 'text') {
+      if (it.text) box.append(el('div', { class: 'bubble' }, renderMarkdown(it.text)));
+    } else if (it.kind === 'tool') box.append(renderTool(it));
+    else if (it.kind === 'notice') box.append(el('div', { class: 'notice', text: it.text }));
+  }
+  const waiting = last ? state.permissions[state.current.id] || [] : [];
+  for (const p of waiting) box.append(renderPermission(p));
+  const live = last && state.streaming.has(state.current.id);
+  if (live && !waiting.length) box.append(el('div', { class: 'muted typing', text: 'Working' }));
+  if (!items.length && !live && !m.error) box.append(el('div', { class: 'muted', text: '(no reply)' }));
+  if (m.error) box.append(el('div', { class: 'err', text: m.error }));
+  const note = last ? state.agentNote[state.current.id] : null;
+  box.append(el('div', { class: 'meta' }, el('span', { text: routeMeta(m) }), note ? el('span', { class: 'agent-note', text: note }) : null));
+  return box;
+}
+
+function removePermission(requestId) {
+  const k = state.current.id;
+  state.permissions[k] = (state.permissions[k] || []).filter((p) => p.requestId !== requestId);
+  rerenderLast();
+}
+
+let rerenderQueued = false;
+function rerenderLast() {
+  if (rerenderQueued) return;
+  rerenderQueued = true;
+  requestAnimationFrame(() => {
+    rerenderQueued = false;
+    const msgs = state.current?.messages || [];
+    const m = msgs[msgs.length - 1];
+    if (!m) return;
+    const node = document.querySelector(`.msg[data-id="${CSS.escape(m.id)}"]`);
+    if (!node) {
+      renderKorero();
+      return;
+    }
+    node.replaceWith(renderMessage(m));
+    const box = $('messages');
+    if (box.scrollHeight - box.scrollTop - box.clientHeight < 300) box.scrollTop = box.scrollHeight;
+  });
+}
+
+listen('agent-event', (ev) => {
+  const p = ev.payload;
+  const k = p.korero;
+  if (p.kind === 'permission') (state.permissions[k] ||= []).push(p);
+  if (p.kind === 'turn_end' || p.kind === 'exit') {
+    state.streaming.delete(k);
+    state.permissions[k] = [];
+    if (state.current?.id === k) {
+      if (p.kind === 'turn_end') attempt(() => openKorero(k));
+      updateStreamingUi();
+    } else if (p.error) {
+      toast(p.error, true);
+    }
+    return;
+  }
+  if (state.current?.id !== k) return;
+  const msgs = state.current.messages;
+  const m = msgs[msgs.length - 1];
+  if (!m || m.role !== 'assistant') return;
+  m.items ||= [];
+  if (p.kind === 'text_start') {
+    m.items.push({ kind: 'text', text: '' });
+  } else if (p.kind === 'text') {
+    const last = m.items[m.items.length - 1];
+    if (last && last.kind === 'text') last.text += p.text;
+    else m.items.push({ kind: 'text', text: p.text });
+  } else if (p.kind === 'tool') {
+    if (!m.items.some((i) => i.kind === 'tool' && i.id === p.id)) m.items.push({ kind: 'tool', id: p.id, name: p.name, input: p.input, result: null });
+  } else if (p.kind === 'tool_result') {
+    const t = m.items.find((i) => i.kind === 'tool' && i.id === p.id);
+    if (t) {
+      t.result = p.result;
+      t.isError = p.isError;
+    }
+  }
+  rerenderLast();
+});
+
+listen('agent-notice', (ev) => {
+  const p = ev.payload;
+  if (p.error) {
+    toast(p.error, true);
+    return;
+  }
+  const bits = [];
+  if (p.redacted) bits.push(`${p.redacted} item${p.redacted === 1 ? '' : 's'} redacted`);
+  if (p.withheld) bits.push(`${p.withheld} image${p.withheld === 1 ? '' : 's'} withheld`);
+  state.agentNote[p.korero] = `Tūmataiti, last request: ${bits.length ? bits.join(', ') : 'nothing to redact'}`;
+  if (state.current?.id === p.korero) rerenderLast();
+});
+
+$('agent-mode').addEventListener('change', () => attempt(async () => {
+  try {
+    state.current = await call('agent_set_mode', { id: state.current.id, mode: $('agent-mode').value });
+    toast('Applies from the next message.');
+  } finally {
+    renderKorero();
+  }
+}));
 
 listen('korero-stream', (ev) => {
   const p = ev.payload;
@@ -411,15 +604,22 @@ for (const b of document.querySelectorAll('.class-toggle button')) {
 
 // ------------------------------------------------------------ provider / model
 
+function isAgentProvider(p) {
+  return p.kind === 'claude_code' || p.kind === 'anthropic';
+}
+
 function fillProviderSelect(preferId) {
   const s = state.settings;
   const sel = $('provider-select');
+  const agent = !!state.current?.agent;
+  state.providerFilter = agent;
+  const list = agent ? s.providers.filter(isAgentProvider) : s.providers;
   sel.replaceChildren(
-    ...s.providers.map((p) => el('option', { value: p.id, text: p.name + (p.kind === 'anthropic' && !p.hasKey ? ' (no key)' : '') })),
+    ...list.map((p) => el('option', { value: p.id, text: p.name + (p.kind === 'anthropic' && !p.hasKey ? ' (no key)' : '') })),
     el('option', { value: '__connect', text: '+ Connect a model…' }),
   );
-  const pick = s.providers.find((p) => p.id === preferId) || s.providers.find((p) => p.id === s.lastProvider)
-    || s.providers.find((p) => p.effectiveTrust === 'device') || s.providers[0];
+  const pick = list.find((p) => p.id === preferId) || list.find((p) => p.id === s.lastProvider)
+    || list.find((p) => p.effectiveTrust === 'device') || list[0];
   sel.value = pick ? pick.id : '__connect';
   fillModelSelect(s.lastModel);
 }
@@ -490,12 +690,17 @@ $('input').addEventListener('keydown', (e) => {
   }
 });
 
+let submitting = false;
 $('composer').addEventListener('submit', (e) => {
   e.preventDefault();
-  attempt(submit);
+  // One send at a time: a second Enter while the first is still on its way
+  // would send the message twice.
+  if (submitting) return;
+  submitting = true;
+  attempt(submit).finally(() => { submitting = false; });
 });
 
-$('stop').addEventListener('click', () => attempt(() => call('cancel_reply', { id: state.current.id })));
+$('stop').addEventListener('click', () => attempt(() => call(state.current.agent ? 'agent_interrupt' : 'cancel_reply', { id: state.current.id })));
 
 async function submit() {
   const text = $('input').value;
@@ -507,22 +712,23 @@ async function submit() {
   const providerId = $('provider-select').value;
   const model = $('model-select').value;
   if (!model) throw new Error('Choose a model first (Settings → Providers can fetch the list).');
+  const agent = !!state.current.agent;
   $('send').disabled = true;
   $('route-note').textContent = 'Checking with Tūmataiti…';
   let preview;
   try {
-    preview = await call('preview_message', { id: state.current.id, text, providerId, model });
+    preview = await call(agent ? 'agent_preview' : 'preview_message', { id: state.current.id, text, providerId, model });
   } finally {
     updateRoute();
     updateStreamingUi();
   }
   let reviewed = false;
   if (preview.blocked || preview.needsReview) {
-    const go = await review(text, providerId, model, preview);
+    const go = await review(text, providerId, model, preview, agent ? 'agent_preview' : 'preview_message');
     if (!go) return;
     reviewed = true;
   }
-  const view = await call('send_message', { id: state.current.id, text, providerId, model, reviewed });
+  const view = await call(agent ? 'agent_send' : 'send_message', { id: state.current.id, text, providerId, model, reviewed });
   $('input').value = '';
   state.streaming.add(view.id);
   state.current = view;
@@ -534,7 +740,7 @@ const reviewCat = $('review-term-cat');
 reviewCat.replaceChildren(...[['PERSON', 'Person'], ['AFFILIATION', 'Affiliation'], ['ADDRESS', 'Place / address'], ['HEALTH', 'Health'], ['OTHER_ID', 'Other ID']]
   .map(([v, t]) => el('option', { value: v, text: t })));
 
-function review(text, providerId, model, preview) {
+function review(text, providerId, model, preview, previewCmd = 'preview_message') {
   return new Promise((resolve) => {
     const dlg = $('review');
     const render = (pv) => {
@@ -576,7 +782,7 @@ function review(text, providerId, model, preview) {
     const focusSafe = (pv) => (pv.blocked ? dlg.querySelector('button[value=cancel]') : $('review-send')).focus();
     const refresh = async () => {
       state.current = await call('get_conversation', { id: state.current.id });
-      const pv = await call('preview_message', { id: state.current.id, text, providerId, model });
+      const pv = await call(previewCmd, { id: state.current.id, text, providerId, model });
       render(pv);
       focusSafe(pv);
     };

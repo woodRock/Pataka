@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent;
+pub mod agent_proxy;
 pub mod audit;
 pub mod commands;
 pub mod crypto;
@@ -75,6 +77,12 @@ pub fn run() {
             commands::provider_templates,
             commands::cli_status,
             commands::model_status,
+            agent::agent_create,
+            agent::agent_preview,
+            agent::agent_send,
+            agent::agent_permission,
+            agent::agent_interrupt,
+            agent::agent_set_mode,
             commands::model_install,
             commands::model_remove,
         ])
