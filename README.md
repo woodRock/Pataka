@@ -27,10 +27,10 @@ Download the installer for your platform. The links fetch the files committed in
 
 | Platform | Download | Notes |
 |---|---|---|
-| Windows 10/11 | [Pataka_0.3.0_x64-setup.exe](https://github.com/woodRock/Pataka/raw/main/release/windows/Pataka_0.3.0_x64-setup.exe) | Installs for the current user. Unsigned, so SmartScreen may warn: choose *More info → Run anyway*. |
-| Linux (Debian, Ubuntu) | [Pataka_0.3.0_amd64.deb](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.3.0_amd64.deb) | `sudo apt install ./Pataka_0.3.0_amd64.deb` |
-| Linux (Fedora, openSUSE) | [Pataka-0.3.0-1.x86_64.rpm](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka-0.3.0-1.x86_64.rpm) | `sudo dnf install ./Pataka-0.3.0-1.x86_64.rpm` |
-| Linux (any) | [Pataka_0.3.0_amd64.AppImage](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.3.0_amd64.AppImage) | `chmod +x` it and run |
+| Windows 10/11 | [Pataka_0.4.0_x64-setup.exe](https://github.com/woodRock/Pataka/raw/main/release/windows/Pataka_0.4.0_x64-setup.exe) | Installs for the current user. Unsigned, so SmartScreen may warn: choose *More info → Run anyway*. |
+| Linux (Debian, Ubuntu) | [Pataka_0.4.0_amd64.deb](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.4.0_amd64.deb) | `sudo apt install ./Pataka_0.4.0_amd64.deb` |
+| Linux (Fedora, openSUSE) | [Pataka-0.4.0-1.x86_64.rpm](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka-0.4.0-1.x86_64.rpm) | `sudo dnf install ./Pataka-0.4.0-1.x86_64.rpm` |
+| Linux (any) | [Pataka_0.4.0_amd64.AppImage](https://github.com/woodRock/Pataka/raw/main/release/linux/Pataka_0.4.0_amd64.AppImage) | `chmod +x` it and run |
 | macOS 13+ (Apple silicon and Intel) | [Pataka_0.4.0_universal.dmg](https://github.com/woodRock/Pataka/raw/main/release/macos/Pataka_0.4.0_universal.dmg) | Open the disk image and drag Pātaka to Applications. Not notarised: the first time, right-click the app and choose *Open* (on macOS 15+, use *System Settings → Privacy & Security → Open Anyway*). |
 
 Check a download before installing:
