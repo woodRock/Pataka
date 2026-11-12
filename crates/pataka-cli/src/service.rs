@@ -1,6 +1,7 @@
 //! The Pātaka service: one long-running Tūmataiti proxy for every Claude Code
-//! session on this computer, including the ones the Claude desktop app
-//! starts, which `pataka claude` cannot wrap.
+//! session started from a terminal, so plain `claude` is covered without
+//! `pataka claude`. It does NOT cover the Claude desktop app: the app starts
+//! Claude Code with its own ANTHROPIC_BASE_URL, which wins over settings.json.
 //!
 //! - `pataka service install` picks a fixed local address and a secret token,
 //!   writes `ANTHROPIC_BASE_URL` (and the prompt hook's address) into the
@@ -493,8 +494,9 @@ pub fn install(port: Option<u16>, yes: bool) -> Result<i32> {
     let settings = read_settings(&settings_file)?;
     let exe = claude_hooks::exe()?;
 
-    println!("Pātaka will run Tūmataiti as a service for every Claude Code session on this computer,");
-    println!("including the ones the Claude desktop app starts. It will:");
+    println!("Pātaka will run Tūmataiti as a service for every Claude Code session you start from a");
+    println!("terminal, so plain `claude` is covered too. (Not the Claude desktop app: it sets its own");
+    println!("model address, so its sessions still go straight to Anthropic.) It will:");
     println!("  - start `{exe} serve` at login, listening on 127.0.0.1 only;");
     println!(
         "  - set ANTHROPIC_BASE_URL and PATAKA_HOOK_URL in {},",
@@ -582,8 +584,8 @@ pub fn install(port: Option<u16>, yes: bool) -> Result<i32> {
             println!("Start it with `{exe} serve`, for example from Task Scheduler at log on.");
         }
     }
-    println!("New Claude Code sessions, in the terminal and in the Claude desktop app, now go");
-    println!("through Tūmataiti. Restart the desktop app, or open a new session, to pick it up.");
+    println!("New Claude Code sessions started from a terminal now go through Tūmataiti.");
+    println!("The Claude desktop app is not covered: it sets its own model address.");
     Ok(0)
 }
 

@@ -36,7 +36,7 @@ enum Cmd {
     },
     /// Run only the proxy for this folder, and print the address to give Claude Code.
     Proxy,
-    /// The always-on proxy for every Claude Code session, including the Claude desktop app's.
+    /// The always-on proxy for every Claude Code session started from a terminal.
     Service {
         #[command(subcommand)]
         action: ServiceCmd,
