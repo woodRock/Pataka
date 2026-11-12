@@ -640,6 +640,33 @@ async fn mail_end_to_end() {
         "the IMAP server got the real name: {raw_search}"
     );
 
+    // 2b. Without a proxy or mod restoring for it (the Claude desktop app):
+    // the server restores its session's placeholders itself, and redacts
+    // what it returns.
+    let placeholder = {
+        let first = seen.lock().unwrap()[0].clone();
+        let i = first.find(&format!("[{}_", "PERSON")).unwrap();
+        first[i..].split(']').next().unwrap().to_string() + "]"
+    };
+    imap.lock().unwrap().log.clear();
+    let (direct, err) = mcp(
+        &client,
+        &base,
+        "search",
+        json!({"query": format!("from:\"{placeholder}\"")}),
+    )
+    .await;
+    assert!(!err, "{direct}");
+    let logged = imap.lock().unwrap().log.join("\n");
+    assert!(logged.contains(NAME), "the server restored the placeholder itself");
+    assert!(direct.contains(SUBJECT) && direct.contains(&placeholder), "{direct}");
+    for secret in ["Wiremu", "Tāmihana", "wiremu@example.nz"] {
+        assert!(
+            !found.contains(secret) && !direct.contains(secret),
+            "a result held {secret}"
+        );
+    }
+
     // 3. Label, audit, read, undo.
     let id = found.lines().find_map(|l| l.strip_prefix("id: ")).unwrap().to_string();
     let (text, err) = mcp(&client, &base, "label", json!({"ids": [id], "add": ["Whānau"]})).await;

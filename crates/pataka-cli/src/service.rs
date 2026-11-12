@@ -62,6 +62,12 @@ pub struct ServiceConfig {
     /// (`null`: not set), put back by `pataka service uninstall`.
     #[serde(default)]
     pub previous_env: Map<String, Value>,
+    /// Pātaka Mail is registered for every Claude Code (`pataka mail register`).
+    #[serde(default)]
+    pub mail: bool,
+    /// claude.ai connectors are switched off in every Claude Code session.
+    #[serde(default)]
+    pub connectors_off: bool,
 }
 
 impl ServiceConfig {
@@ -76,6 +82,19 @@ impl ServiceConfig {
             ("PATAKA_HOOK_URL", format!("{}/pataka/check-prompt", self.base_url())),
         ];
         v.extend(TELEMETRY_OFF.iter().map(|k| (*k, "1".to_string())));
+        v.extend(self.mail_env());
+        v
+    }
+
+    /// The `env` entries for Pātaka Mail, when registered.
+    pub fn mail_env(&self) -> Vec<(&'static str, String)> {
+        let mut v = Vec::new();
+        if self.mail {
+            v.push(("PATAKA_MAIL_URL", format!("{}/pataka/mcp", self.base_url())));
+        }
+        if self.connectors_off {
+            v.push(("ENABLE_CLAUDEAI_MCP_SERVERS", "false".to_string()));
+        }
         v
     }
 }
@@ -256,6 +275,13 @@ impl Host for ServiceHost {
         self.store.save_conversation(&key, &c)
     }
 
+    fn mail(&self) -> Result<pataka_core::mail::MailVault> {
+        Ok(pataka_core::mail::MailVault {
+            store: self.store.clone(),
+            key: self.key()?,
+        })
+    }
+
     fn audit_path(&self) -> PathBuf {
         self.store.audit_path()
     }
@@ -305,8 +331,9 @@ pub async fn start(host: Arc<ServiceHost>, cfg: &ServiceConfig) -> Result<(agent
             korero: cfg.korero.clone(),
             upstream: cfg.upstream.clone(),
             vault: host.vault.clone(),
-            // Plain `claude` sessions do not register Pātaka Mail.
-            mail: false,
+            // Pātaka Mail for every Claude Code that registered it
+            // (`pataka mail register`); it answers only while unlocked.
+            mail: true,
         },
         cfg.token.clone(),
     );
@@ -536,6 +563,8 @@ pub fn install(port: Option<u16>, yes: bool) -> Result<i32> {
             None => choose_upstream(&settings)?,
         },
         previous_env: Map::new(),
+        mail: old.as_ref().is_some_and(|c| c.mail),
+        connectors_off: old.as_ref().is_some_and(|c| c.connectors_off),
     };
     cfg.previous_env = match &old {
         Some(c) if !c.previous_env.is_empty() => c.previous_env.clone(),
@@ -591,6 +620,139 @@ pub fn install(port: Option<u16>, yes: bool) -> Result<i32> {
     Ok(0)
 }
 
+// ------------------------------------------------------------ Pātaka Mail
+
+/// Add or remove `pataka-mail` in Claude Code's user config, through
+/// Claude Code's own `claude mcp` command. Returns whether it worked.
+fn mcp_registration(add: bool) -> bool {
+    let Some(claude) = pataka_core::providers::cli::locate(pataka_core::model::ProviderKind::ClaudeCode, None) else {
+        return false;
+    };
+    let name = pataka_core::mail::SERVER_NAME;
+    let run = |args: &[&str]| {
+        Command::new(&claude)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    // Remove first, so adding is idempotent.
+    let removed = run(&["mcp", "remove", "--scope", "user", name]);
+    if !add {
+        return removed || !claude_hooks::mail_registered();
+    }
+    let entry = claude_hooks::mail_server_entry().to_string();
+    run(&["mcp", "add-json", "--scope", "user", name, &entry])
+}
+
+/// `pataka mail register` / `unregister`: make Pātaka Mail available to every
+/// Claude Code (terminal, the Claude desktop app's Code tab) through the
+/// service, or take it away again. Asks first unless `yes`.
+pub fn mail_register(on: bool, connectors_off: bool, yes: bool) -> Result<i32> {
+    let store = ctx::store()?;
+    let Some(mut cfg) = read_config(&store)? else {
+        if on {
+            return Err(Error::Invalid(
+                "Pātaka Mail for every Claude Code runs in the Pātaka service. Install it first with `pataka service install`.".into(),
+            ));
+        }
+        mcp_registration(false);
+        println!("Pātaka Mail is not registered.");
+        return Ok(0);
+    };
+    let settings_file = settings_path()?;
+    let settings = read_settings(&settings_file)?;
+    if on {
+        println!("Pātaka will make your mailbox available to every Claude Code session as pataka-mail:");
+        println!("  - add pataka-mail to Claude Code's user MCP servers (~/.claude.json), served by the");
+        println!("    Pātaka service on 127.0.0.1;");
+        println!(
+            "  - set PATAKA_MAIL_URL in {}, and keep Pātaka's tool guard there;",
+            settings_file.display()
+        );
+        if connectors_off {
+            println!("  - switch off claude.ai connectors (such as Gmail) in every Claude Code session,");
+            println!("    because they read mail on Anthropic's side, unredacted.");
+        }
+        println!("Mail results are redacted by Pātaka before Claude Code sees them, in every app.");
+        if !yes && !ctx::confirm("Go ahead?", false) {
+            println!("Nothing changed.");
+            return Ok(0);
+        }
+        cfg.mail = true;
+        cfg.connectors_off = connectors_off;
+        for (k, _) in cfg.mail_env() {
+            cfg.previous_env
+                .entry(k.to_string())
+                .or_insert_with(|| settings["env"].get(k).cloned().unwrap_or(Value::Null));
+        }
+        write_config(&store, &cfg)?;
+        let exe = claude_hooks::exe()?;
+        let settings = claude_hooks::merged(settings, &exe, true, true);
+        write_settings(&settings_file, &merged_env(settings, &cfg, true))?;
+        if !mcp_registration(true) {
+            return Err(Error::Invalid(
+                "Claude Code could not register pataka-mail (is `claude` installed?). Nothing else needs undoing; try again.".into(),
+            ));
+        }
+        println!("Done. Start a new Claude Code session (any app) and the pataka-mail tools are there.");
+        println!("The service must be running and unlocked for them to answer.");
+    } else {
+        // Put back only the mail entries.
+        let mail_only = ServiceConfig {
+            previous_env: cfg.previous_env.clone(),
+            mail: cfg.mail,
+            connectors_off: cfg.connectors_off,
+            ..cfg.clone()
+        };
+        let mut s = settings.clone();
+        if let Some(env) = s["env"].as_object_mut() {
+            for (k, v) in mail_only.mail_env() {
+                if env.get(k).and_then(Value::as_str) == Some(v.as_str()) {
+                    match cfg.previous_env.get(k) {
+                        Some(prev) if !prev.is_null() => {
+                            env.insert(k.to_string(), prev.clone());
+                        }
+                        _ => {
+                            env.remove(k);
+                        }
+                    }
+                }
+            }
+        }
+        if s != settings {
+            write_settings(&settings_file, &s)?;
+        }
+        for (k, _) in mail_only.mail_env() {
+            cfg.previous_env.remove(k);
+        }
+        cfg.mail = false;
+        cfg.connectors_off = false;
+        write_config(&store, &cfg)?;
+        mcp_registration(false);
+        println!("Pātaka Mail is no longer registered for every Claude Code. `pataka claude` still offers it.");
+    }
+    let _ = audit::append(
+        &store.audit_path(),
+        audit::Entry {
+            event: if on {
+                "mail-registered".into()
+            } else {
+                "mail-unregistered".into()
+            },
+            korero: Some(cfg.korero.clone()),
+            ..Default::default()
+        },
+    );
+    Ok(0)
+}
+
+/// Whether the service is installed (for `pataka mail connect`).
+pub fn installed() -> bool {
+    ctx::store().ok().and_then(|s| read_config(&s).ok().flatten()).is_some()
+}
+
 fn wait_until_up(cfg: &ServiceConfig) -> bool {
     for _ in 0..40 {
         if block_on(call(cfg, reqwest::Method::GET, "status", None)).is_ok() {
@@ -613,6 +775,9 @@ pub fn uninstall() -> Result<i32> {
     let after = merged_env(before.clone(), &cfg, false);
     if after != before {
         write_settings(&settings_file, &after)?;
+    }
+    if cfg.mail {
+        mcp_registration(false);
     }
     autostart::uninstall();
     std::fs::remove_file(config_path(&store))?;
@@ -880,7 +1045,28 @@ mod tests {
             korero: "k".into(),
             upstream: "https://api.anthropic.com".into(),
             previous_env: Map::new(),
+            mail: false,
+            connectors_off: false,
         }
+    }
+
+    #[test]
+    fn mail_registration_env_is_added_and_put_back() {
+        let mut c = cfg();
+        assert!(c.mail_env().is_empty());
+        c.mail = true;
+        c.connectors_off = true;
+        let keys: Vec<&str> = c.env().iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&"PATAKA_MAIL_URL") && keys.contains(&"ENABLE_CLAUDEAI_MCP_SERVERS"));
+        assert!(c.mail_env()[0].1.ends_with("/pataka/mcp"));
+        // The person had connectors explicitly on before: uninstall puts that back.
+        c.previous_env
+            .insert("ENABLE_CLAUDEAI_MCP_SERVERS".into(), json!("true"));
+        let on = merged_env(json!({"env": {"ENABLE_CLAUDEAI_MCP_SERVERS": "true"}}), &c, true);
+        assert_eq!(on["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"], "false");
+        let off = merged_env(on, &c, false);
+        assert_eq!(off["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"], "true");
+        assert!(off["env"].get("PATAKA_MAIL_URL").is_none());
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use pataka_core::agent_proxy::{self, Proxy, Session};
+use pataka_core::claude_hooks::{self, SettingsFile};
 use pataka_core::error::{Error, Result};
 use pataka_core::model::ProviderKind;
 use pataka_core::providers::cli as vendor;
@@ -101,13 +102,29 @@ pub fn claude(args: Vec<String>) -> Result<i32> {
         "pataka: Claude Code is going through Tūmataiti ({}). Only redacted text reaches Anthropic.",
         run.title
     );
-    let mut args = args;
     if run.mail {
         eprintln!("pataka: your mailbox is available to Claude Code as pataka-mail (changes ask first in auto mode); claude.ai connectors are off for this session.");
-        let mut extra = mail_args(&pataka_core::claude_hooks::exe()?);
-        extra.append(&mut args);
-        args = extra;
     }
+    // The session's settings, at Claude Code's flag level: they outrank
+    // ~/.claude/settings.json, whose `env` may point Claude Code at the
+    // `pataka service` instead (it would then bypass this proxy).
+    let guard_exe = if run.mail {
+        Some(pataka_core::claude_hooks::exe()?)
+    } else {
+        None
+    };
+    let settings = SettingsFile::write(&claude_hooks::session_settings(
+        &run.base_url,
+        run.mail,
+        guard_exe.as_deref(),
+    ))?;
+    let mut extra = vec!["--settings".to_string(), settings.path().display().to_string()];
+    // Registered for every Claude Code already (`pataka mail register`)? Its
+    // address is PATAKA_MAIL_URL, which these settings point at this proxy.
+    if run.mail && !claude_hooks::mail_registered() {
+        extra.extend(claude_hooks::mail_mcp_args());
+    }
+    let args: Vec<String> = extra.into_iter().chain(args).collect();
 
     // Claude Code handles Ctrl-C itself; this process must not die first,
     // or the proxy would vanish under it.
@@ -141,27 +158,6 @@ pub fn claude(args: Vec<String>) -> Result<i32> {
         .map_err(|_| Error::Invalid("Claude Code could not be started.".into()))?;
     run.proxy.close_all();
     Ok(status.code().unwrap_or(1))
-}
-
-/// Arguments that register Pātaka Mail with Claude Code for this session:
-///
-/// - `--mcp-config`: the `pataka-mail` server, inline. Its address comes
-///   from `PATAKA_MAIL_URL`, which Claude Code expands, so the secret path
-///   never appears in the process list.
-/// - `--settings`: the PreToolUse guard for its tools only, so mail changes
-///   ask first in every mode even where `pataka hooks` was not installed.
-pub fn mail_args(exe: &str) -> Vec<String> {
-    let mcp = serde_json::json!({"mcpServers": {pataka_core::mail::SERVER_NAME: {
-        "type": "http", "url": "${PATAKA_MAIL_URL}"}}});
-    let settings = serde_json::json!({"hooks": {"PreToolUse": [{
-        "matcher": "mcp__pataka-mail__.*",
-        "hooks": [{"type": "command", "command": format!("\"{exe}\" hook pretool")}]}]}});
-    vec![
-        "--mcp-config".into(),
-        mcp.to_string(),
-        "--settings".into(),
-        settings.to_string(),
-    ]
 }
 
 /// Run only the proxy, for other tools or a Claude Code started by hand.
@@ -199,12 +195,27 @@ mod tests {
 
     #[test]
     fn mail_registration_keeps_the_secret_out_of_the_arguments() {
-        let a = mail_args("/usr/local/bin/pataka");
+        let a = claude_hooks::mail_mcp_args();
         assert_eq!(a[0], "--mcp-config");
         let mcp: serde_json::Value = serde_json::from_str(&a[1]).unwrap();
         assert_eq!(mcp["mcpServers"]["pataka-mail"]["url"], "${PATAKA_MAIL_URL}");
         assert!(!a.iter().any(|x| x.contains("/s/")));
-        let s: serde_json::Value = serde_json::from_str(&a[3]).unwrap();
+    }
+
+    #[test]
+    fn session_settings_outrank_the_service_address() {
+        let base = "http://127.0.0.1:5/s/abc";
+        let s = claude_hooks::session_settings(base, false, None);
+        assert_eq!(s["env"]["ANTHROPIC_BASE_URL"], base);
+        assert!(s.get("hooks").is_none() && s["env"].get("PATAKA_MAIL_URL").is_none());
+        let s = claude_hooks::session_settings(base, true, Some("/bin/pataka"));
+        assert_eq!(s["env"]["PATAKA_MAIL_URL"], format!("{base}/pataka/mcp"));
+        assert_eq!(s["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"], "false");
         assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "mcp__pataka-mail__.*");
+        let f = SettingsFile::write(&s).unwrap();
+        let path = f.path();
+        assert!(path.exists());
+        drop(f);
+        assert!(!path.exists());
     }
 }

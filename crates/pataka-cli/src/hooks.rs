@@ -130,7 +130,57 @@ fn defers_to_session(input: &Value) -> bool {
 /// nobody could say yes, so the change is refused.
 fn mail_decision(input: &Value) -> Option<Value> {
     let tool = input["tool_name"].as_str().unwrap_or("");
-    let reason = guards::review_mail(tool, &input["tool_input"], defers_to_session(input))?;
+    let cwd = input["cwd"].as_str().map(PathBuf::from);
+    mail_decision_with(input, allowed_by_rule(tool, &settings_files(cwd.as_deref())))
+}
+
+/// Claude Code's settings files that can hold permission rules: user,
+/// user-local, project and project-local.
+fn settings_files(cwd: Option<&std::path::Path>) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(user) = pataka_core::claude_hooks::settings_path() {
+        v.push(user.with_file_name("settings.local.json"));
+        v.push(user);
+    }
+    if let Some(c) = cwd {
+        v.push(c.join(".claude").join("settings.json"));
+        v.push(c.join(".claude").join("settings.local.json"));
+    }
+    v
+}
+
+/// Whether the person allowed this mail tool with "Yes, don't ask again"
+/// (an `allow` rule for the tool, or for all of pataka-mail) and did not
+/// deny or ask for it anywhere. That is an explicit yes for small changes;
+/// trash and bulk changes still ask every time.
+fn allowed_by_rule(tool: &str, files: &[PathBuf]) -> bool {
+    let server = tool.rsplit_once("__").map(|(s, _)| s).unwrap_or(tool);
+    let matches = |r: &str| r == tool || r == server || r == format!("{server}__*");
+    let rules = |kind: &str| -> Vec<String> {
+        files
+            .iter()
+            .filter_map(|p| std::fs::read(p).ok())
+            .filter_map(|b| serde_json::from_slice::<Value>(&b).ok())
+            .flat_map(|v| {
+                v["permissions"][kind]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
+    };
+    let deny_or_ask: Vec<String> = rules("deny").into_iter().chain(rules("ask")).collect();
+    rules("allow").iter().any(|r| matches(r)) && !deny_or_ask.iter().any(|r| matches(r))
+}
+
+fn mail_decision_with(input: &Value, allowed: bool) -> Option<Value> {
+    let tool = input["tool_name"].as_str().unwrap_or("");
+    let strict = defers_to_session(input) && !allowed;
+    let reason = guards::review_mail(tool, &input["tool_input"], strict)?;
     let mode = input["permission_mode"].as_str().unwrap_or("");
     let (decision, text) = if matches!(mode, "bypassPermissions" | "dontAsk") {
         (
@@ -190,10 +240,15 @@ mod tests {
     }
 
     fn mail(tool: &str, n: usize, mode: &str) -> Option<String> {
-        let ids: Vec<String> = (0..n).map(|i| format!("g1.{i}")).collect();
-        mail_decision(
+        mail_allowed(tool, n, mode, false)
+    }
+
+    fn mail_allowed(tool: &str, n: usize, mode: &str, allowed: bool) -> Option<String> {
+        let ids: Vec<String> = (0..n).map(|i| format!("mail_1_{i}")).collect();
+        mail_decision_with(
             &json!({"tool_name": format!("mcp__pataka-mail__{tool}"), "permission_mode": mode,
-                              "tool_input": {"ids": ids}}),
+                    "tool_input": {"ids": ids}}),
+            allowed,
         )
         .map(|v| {
             v["hookSpecificOutput"]["permissionDecision"]
@@ -201,6 +256,31 @@ mod tests {
                 .unwrap()
                 .to_string()
         })
+    }
+
+    #[test]
+    fn dont_ask_again_is_honoured_for_small_changes_only() {
+        // "Yes, don't ask again" for label: small labels stop asking, even in auto mode…
+        assert_eq!(mail_allowed("label", 3, "auto", true), None);
+        // …but bulk changes and trash still ask.
+        assert_eq!(mail_allowed("label", 26, "auto", true).as_deref(), Some("ask"));
+        assert_eq!(mail_allowed("trash", 1, "auto", true).as_deref(), Some("ask"));
+    }
+
+    #[test]
+    fn allow_rules_are_read_from_settings_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("settings.local.json");
+        std::fs::write(&f, r#"{"permissions": {"allow": ["mcp__pataka-mail__label"]}}"#).unwrap();
+        let files = vec![f.clone(), dir.path().join("missing.json")];
+        assert!(allowed_by_rule("mcp__pataka-mail__label", &files));
+        assert!(!allowed_by_rule("mcp__pataka-mail__archive", &files));
+        std::fs::write(&f, r#"{"permissions": {"allow": ["mcp__pataka-mail"]}}"#).unwrap();
+        assert!(allowed_by_rule("mcp__pataka-mail__archive", &files));
+        // A deny or ask rule anywhere wins.
+        let g = dir.path().join("settings.json");
+        std::fs::write(&g, r#"{"permissions": {"ask": ["mcp__pataka-mail__archive"]}}"#).unwrap();
+        assert!(!allowed_by_rule("mcp__pataka-mail__archive", &[f, g]));
     }
 
     #[test]

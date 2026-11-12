@@ -64,7 +64,7 @@ pataka unlock              # after each login, if you use a passphrase
 
 **It does not cover the Claude desktop app.** The app starts Claude Code with its own `ANTHROPIC_BASE_URL`, which takes precedence over `settings.json`, so its Code and Chat tabs still send unredacted text to Anthropic. For redacted agent work, use `pataka claude` in a terminal or an agent kōrero in the Pātaka app.
 
-With the service installed, plain `claude` is enough: `pataka claude` is not needed.
+With the service installed, plain `claude` is enough: `pataka claude` is not needed. If you do run `pataka claude` with the service installed, its own proxy takes over for that session: it passes its address as session settings, which outrank the service address in `~/.claude/settings.json`. That is what gives that session Pātaka Mail and the request log.
 
 It **fails closed**. While the service is locked, Claude Code shows *"Pātaka is locked, so nothing was sent"*. While it is stopped, Claude Code cannot connect and keeps retrying. Either way nothing leaves unredacted. If Claude Code seems stuck, check with `pataka service status`.
 
@@ -124,7 +124,7 @@ For Gmail, switch IMAP on in Gmail's settings and create an **app password** (Go
 
 ### Use
 
-Run `pataka claude` as usual. While a mailbox is connected, Claude Code gets the `pataka-mail` tools:
+Run `pataka claude` as usual. While a mailbox is connected, Claude Code gets the `pataka-mail` tools. The Pātaka app's agent kōrero get them too. To offer them to *every* Claude Code session, including plain `claude` and the Claude desktop app's **Code** tab, see [Every Claude Code](#every-claude-code) below.
 
 | Tool | What it does | Asks you first |
 |---|---|---|
@@ -149,7 +149,7 @@ Pātaka always asks before a change:
 
 - that touches **more than 25 messages**. It tells you how many, for example *"this archives 214 emails"*;
 - that moves messages to the **Trash**. It asks every time, and saying yes once does not allow it again;
-- of any kind in **auto mode**. Email can contain instructions aimed at Claude, and auto mode's own checks read that same email. So every change needs your explicit yes;
+- of any kind in **auto mode**, until you answer **Yes, and don't ask again** for that tool. Email can contain instructions aimed at Claude, and auto mode's own checks read that same email, so every change needs your explicit yes: once per tool is enough. Bulk changes and the Trash still ask every time;
 - of any kind with permission prompts switched off (`bypassPermissions` or `dontAsk`). There is nobody to ask, so the change is refused. Switch to the default mode or auto mode to approve it.
 
 `pataka claude` adds this check to the session itself, so it applies whether or not you ran `pataka hooks install`.
@@ -171,6 +171,24 @@ It reads your own setup from `~/.claude/inbox-triage.md`: your label names, what
 
 The skill only labels and archives. It never sends, deletes, trashes or marks messages as read. Archiving more than 25 threads at once asks you first, as any bulk change does. The report is shown in your terminal with real names, but Anthropic only saw placeholders. It lists events worth adding to your calendar instead of adding them, because a calendar connector would only receive placeholders.
 
+### Every Claude Code
+
+With the Pātaka service installed (`pataka service install`), one command offers your mailbox to every Claude Code session:
+
+```bash
+pataka mail register
+```
+
+`pataka mail connect` offers this too when the service is installed. It asks first, then:
+
+- adds `pataka-mail` to Claude Code's user MCP servers (`~/.claude.json`). Its address is `${PATAKA_MAIL_URL}`, so no secret is stored there;
+- sets `PATAKA_MAIL_URL` (the service's mail address) in `~/.claude/settings.json`, and keeps Pātaka's tool guard there;
+- switches off claude.ai connectors in every session (`ENABLE_CLAUDEAI_MCP_SERVERS=false`), because they read mail on Anthropic's side, unredacted. Use `--keep-connectors` to leave them on.
+
+Then plain `claude`, the Claude desktop app's **Code** tab and the Pātaka app all reach the same mail server in the service. `pataka claude` and the Pātaka app use their own proxy for the session instead. The service must be running and unlocked: while it is locked, the mail tools answer "Pātaka is locked". `pataka mail unregister`, `pataka mail disconnect` and `pataka service uninstall` take it away again.
+
+In the Claude desktop app, Pātaka has no proxy in the path. Mail results are still redacted by Pātaka Mail itself, but anything else you do in that session is only protected if the Tūmataiti mod is installed.
+
 ### Undo
 
 Every change is written to the audit log. Its entry number appears in the tool's result, and in `pataka audit show` (as `mail-label`, `mail-archive` and so on). To reverse one change:
@@ -183,17 +201,17 @@ This puts back the labels, flags or folder the messages had, and writes its own 
 
 ### What goes where
 
-- **Anthropic** sees search results and messages only after the proxy has redacted them, as for file contents. Message bodies are cut at about 20 KB. Attachments are listed by name and size only: their content is never read or sent.
+- **Anthropic** never sees your mail unredacted. Pātaka Mail redacts every result itself, with your kaupapa and lists, before Claude Code receives it, and puts real values back into Claude's tool calls on your computer. The same happens whichever app runs Claude Code. Message bodies are cut at about 20 KB. Attachments are listed by name and size only: their content is never read or sent. Because results arrive redacted, Claude Code's own display of a tool result shows placeholders.
 - **Your mail server** receives real values, such as the name you search for or a label name, over TLS. Pātaka connects only to the server you connected, and to no other host.
 - **The audit log** holds the action, message ids and, for each label or folder, a keyed hash plus a reference into the encrypted `mail.ptk`. It never holds subjects, addresses or message text.
 - **Claude Code's transcripts** (`~/.claude/projects`) hold the messages it read, with real values, just as they do for files.
 
 ### Limits
 
-- Pātaka Mail cannot send email or delete it permanently (`draft` only saves to Drafts), and it does not use OAuth or the Gmail API. The Pātaka app does not offer it yet, and neither does a plain `claude` under `pataka service`.
+- Pātaka Mail cannot send email or delete it permanently (`draft` only saves to Drafts), and it does not use OAuth or the Gmail API.
 - On Gmail, search covers All Mail, which leaves out Spam and Trash.
 - On other servers, labels are folders. `label` is not available there, `move` needs the server's MOVE support, and `archive` needs an Archive folder.
-- Pātaka restores placeholders only for tools named `mcp__pataka-mail__*`, and only in sessions it registered the server for. Do not add another MCP server called `pataka-mail` to your Claude Code settings.
+- Real values go back only into `pataka-mail`'s own tool calls. Do not add another MCP server called `pataka-mail` to your Claude Code settings.
 
 ## Check what was sent
 

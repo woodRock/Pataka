@@ -88,6 +88,15 @@ pub fn connect(host: Option<String>, email: Option<String>) -> Result<i32> {
         if gmail { " (Gmail)" } else { "" }
     );
     println!("Claude Code only ever sees redacted text; changes are logged and `pataka mail undo` reverses them.");
+    if crate::service::installed() && !pataka_core::claude_hooks::mail_registered() {
+        println!();
+        println!("The Pātaka service is installed, so pataka-mail can also be offered to every Claude Code");
+        println!("session, including the Claude desktop app's Code tab.");
+        if ctx::confirm("Set that up now?", true) {
+            return crate::service::mail_register(true, true, true);
+        }
+        println!("Later: `pataka mail register`.");
+    }
     Ok(0)
 }
 
@@ -99,6 +108,9 @@ pub fn disconnect() -> Result<i32> {
         return Ok(0);
     };
     v.set_account(None)?;
+    if pataka_core::claude_hooks::mail_registered() {
+        let _ = crate::service::mail_register(false, false, true);
+    }
     audit::append(
         &ctx.store.audit_path(),
         audit::Entry {
@@ -116,7 +128,17 @@ pub fn disconnect() -> Result<i32> {
 pub fn status() -> Result<i32> {
     let ctx = Ctx::open()?;
     match vault(&ctx).load()?.account {
-        Some(a) => println!("Connected: {} on {}:{}", a.email, a.host, a.port),
+        Some(a) => {
+            println!("Connected: {} on {}:{}", a.email, a.host, a.port);
+            println!(
+                "Offered to: `pataka claude`{}",
+                if pataka_core::claude_hooks::mail_registered() {
+                    ", and every Claude Code session through the service (`pataka mail register`)"
+                } else {
+                    " only (run `pataka mail register` for every Claude Code session)"
+                }
+            );
+        }
         None => println!("No mailbox is connected. Connect one with `pataka mail connect`."),
     }
     Ok(0)

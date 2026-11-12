@@ -64,6 +64,8 @@ pub struct Running {
     decided: Mutex<HashMap<String, String>>,
     /// The assistant message this turn writes into.
     turn: Mutex<Option<String>>,
+    /// The session's flag-level settings file, removed with the agent.
+    _settings: pataka_core::claude_hooks::SettingsFile,
 }
 
 impl Running {
@@ -198,6 +200,16 @@ impl agent_proxy::Host for AppHost {
         self.app.state::<AppState>().store.audit_path()
     }
 
+    fn mail(&self) -> Result<pataka_core::mail::MailVault> {
+        let state = self.app.state::<AppState>();
+        state.with_session(|s| {
+            Ok(pataka_core::mail::MailVault {
+                store: state.store.clone(),
+                key: s.key.clone(),
+            })
+        })
+    }
+
     fn notify(&self, _korero: &str, event: Value) {
         let _ = self.app.emit("agent-notice", event);
     }
@@ -235,13 +247,32 @@ async fn spawn(
         Error::Invalid("Claude Code was not found. Install it (https://claude.com/claude-code), or connect it in Settings → Providers.".into())
     })?;
     let proxy = proxy(app).await?;
+    // Pātaka Mail, when a mailbox is connected (`pataka mail connect`).
+    let mail = {
+        let state = app.state::<AppState>();
+        state
+            .with_session(|s| {
+                Ok(pataka_core::mail::MailVault {
+                    store: state.store.clone(),
+                    key: s.key.clone(),
+                }
+                .connected()
+                .unwrap_or(false))
+            })
+            .unwrap_or(false)
+    };
     let base_url = proxy.open(agent_proxy::Session {
         korero: conv.id.clone(),
         upstream: upstream(),
         vault: Arc::new(Mutex::new(conv.vault.clone())),
-        // The app does not offer Pātaka Mail yet.
-        mail: false,
+        mail,
     });
+    // This proxy's address (and Pātaka Mail's) as flag-level settings, which
+    // outrank a `pataka service` address in ~/.claude/settings.json. The
+    // app's own approvals apply the mail guards, so no hook is added.
+    let settings = pataka_core::claude_hooks::SettingsFile::write(&pataka_core::claude_hooks::session_settings(
+        &base_url, mail, None,
+    ))?;
 
     let mut args: Vec<String> = [
         "-p",
@@ -271,12 +302,18 @@ async fn spawn(
         args.push("--resume".into());
         args.push(sid.into());
     }
+    args.push("--settings".into());
+    args.push(settings.path().display().to_string());
+    if mail && !pataka_core::claude_hooks::mail_registered() {
+        args.extend(pataka_core::claude_hooks::mail_mcp_args());
+    }
 
     let mut cmd = cli::command(&exe);
     cmd.args(&args)
         .current_dir(&workspace)
         .stdin(Stdio::piped())
         .env("ANTHROPIC_BASE_URL", &base_url)
+        .env("PATAKA_MAIL_URL", format!("{base_url}/pataka/mcp"))
         // No telemetry, error reports, update checks or other background traffic.
         .env("DISABLE_TELEMETRY", "1")
         .env("DISABLE_ERROR_REPORTING", "1")
@@ -308,6 +345,7 @@ async fn spawn(
         pending: Mutex::new(HashMap::new()),
         decided: Mutex::new(HashMap::new()),
         turn: Mutex::new(None),
+        _settings: settings,
     });
     running
         .write(&json!({"type": "control_request", "request_id": "pataka-init", "request": {"subtype": "initialize"}}))
@@ -551,7 +589,10 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
                 let tool = r["tool_name"].as_str().unwrap_or("").to_string();
                 let tool_use_id = r["tool_use_id"].as_str().unwrap_or("").to_string();
                 // Pātaka's guards ask whatever the mode or earlier answers.
-                let guard = if run.mode == "auto" {
+                let always = run.always.lock().unwrap_or_else(|e| e.into_inner()).contains(&tool);
+                // In auto mode every mail change asks, unless the person chose
+                // "always" for that tool (trash and bulk changes still ask).
+                let guard = if run.mode == "auto" && !always {
                     guards::review_tool_auto(&tool, &r["input"], &run.workspace)
                 } else {
                     guards::review_tool(&tool, &r["input"], &run.workspace)
@@ -943,8 +984,8 @@ pub async fn agent_permission(
                      "response": {"behavior": "deny", "message": "The person declined this in Pātaka."}}}),
     };
     let how = match decision.as_str() {
-        // Mail changes are never "always allowed": each needs its own yes.
-        "always" if guards::is_mail_mutation(&tool) => "allowed",
+        // Moving mail to the Trash is never "always allowed": each needs its own yes.
+        "always" if tool == "mcp__pataka-mail__trash" => "allowed",
         "always" => {
             // The tool comes from Pātaka's own record of the request, not the window.
             run.always.lock().unwrap_or_else(|e| e.into_inner()).insert(tool);

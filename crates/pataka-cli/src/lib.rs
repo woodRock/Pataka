@@ -155,6 +155,17 @@ enum MailCmd {
     Status,
     /// Reverse one change Claude made, by its audit entry number.
     Undo { entry: u64 },
+    /// Offer pataka-mail to every Claude Code (terminal and the Claude desktop app), through the service.
+    Register {
+        /// Leave claude.ai connectors (such as Gmail) switched on.
+        #[arg(long)]
+        keep_connectors: bool,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Stop offering pataka-mail to every Claude Code (`pataka claude` still offers it).
+    Unregister,
 }
 
 #[derive(Subcommand)]
@@ -226,6 +237,8 @@ pub fn run() -> i32 {
             MailCmd::Disconnect => mail::disconnect(),
             MailCmd::Status => mail::status(),
             MailCmd::Undo { entry } => mail::undo(entry),
+            MailCmd::Register { keep_connectors, yes } => service::mail_register(true, !keep_connectors, yes),
+            MailCmd::Unregister => service::mail_register(false, false, true),
         },
         Cmd::Status => config::status(),
         Cmd::Hook { which } => match which.as_str() {

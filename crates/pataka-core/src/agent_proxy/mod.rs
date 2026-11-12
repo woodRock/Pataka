@@ -280,7 +280,7 @@ async fn mail_mcp(st: &ProxyState, session: &Session, method: &Method, headers: 
             .body(Body::empty())
             .expect("response builds");
     }
-    let Ok(msg) = serde_json::from_slice::<Value>(body) else {
+    let Ok(mut msg) = serde_json::from_slice::<Value>(body) else {
         return json_response(
             StatusCode::BAD_REQUEST,
             serde_json::json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error"}}),
@@ -298,7 +298,46 @@ async fn mail_mcp(st: &ProxyState, session: &Session, method: &Method, headers: 
         audit: st.host.audit_path(),
         korero: session.korero.clone(),
     };
+    // The server is self-contained, so it is equally safe from a terminal,
+    // the Claude desktop app or the Pātaka app: placeholders this session
+    // issued are put back into the arguments here, on this computer, and
+    // every result is redacted with the same vault before it leaves.
+    let is_call = msg["method"] == "tools/call";
+    if is_call {
+        redact::restore_strings(
+            &mut msg["params"]["arguments"],
+            &session.vault.lock().unwrap_or_else(|p| p.into_inner()),
+        );
+    }
     match crate::mail::mcp::handle(&ctx, &msg).await {
+        Some(mut v) if is_call => {
+            let text = v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let host = st.host.clone();
+            let session = session.clone();
+            let redacted =
+                tokio::task::spawn_blocking(move || redact_texts_as(host.as_ref(), &session, &[text], "mail")).await;
+            let (text, error) = match redacted {
+                Ok(Ok((mut t, _, false))) => (t.pop().unwrap_or_default(), None),
+                Ok(Ok((_, _, true))) => (
+                    String::new(),
+                    Some("Pātaka withheld this result: it contains a term your kaupapa marks tapu."),
+                ),
+                _ => (
+                    String::new(),
+                    Some("Pātaka could not check this result, so it was withheld."),
+                ),
+            };
+            match error {
+                None => v["result"]["content"][0]["text"] = Value::String(text),
+                Some(e) => {
+                    v["result"] = serde_json::json!({"content": [{"type": "text", "text": e}], "isError": true});
+                }
+            }
+            json_response(StatusCode::OK, v)
+        }
         Some(v) => json_response(StatusCode::OK, v),
         None => Response::builder()
             .status(StatusCode::ACCEPTED)
@@ -402,6 +441,16 @@ pub fn redact_texts(
     session: &Session,
     texts: &[String],
 ) -> Result<(Vec<String>, redact::Stats, bool)> {
+    redact_texts_as(host, session, texts, "mod")
+}
+
+/// `redact_texts`, audited as `<source>-redacted` / `<source>-blocked`.
+pub fn redact_texts_as(
+    host: &dyn Host,
+    session: &Session,
+    texts: &[String],
+    source: &str,
+) -> Result<(Vec<String>, redact::Stats, bool)> {
     let (kaupapa, conv_terms, conv_allow) = host.context(&session.korero)?;
     let k = redact::agent_kaupapa(&kaupapa);
     let model = if kaupapa.use_model { host.model()? } else { None };
@@ -431,9 +480,9 @@ pub fn redact_texts(
             &host.audit_path(),
             audit::Entry {
                 event: if tapu {
-                    "mod-blocked".into()
+                    format!("{source}-blocked")
                 } else {
-                    "mod-redacted".into()
+                    format!("{source}-redacted")
                 },
                 korero: Some(session.korero.clone()),
                 categories: stats.categories.clone(),

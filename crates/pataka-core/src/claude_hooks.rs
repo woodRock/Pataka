@@ -10,6 +10,90 @@ use crate::error::{Error, Result};
 
 pub const TOOL_MATCHER: &str = "Bash|BashOutput|Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep|LS|WebFetch|mcp__.*";
 
+/// Claude Code's user config (`~/.claude.json`), where user-scope MCP
+/// servers live.
+pub fn user_config_path() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir).join(".claude.json"));
+    }
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .ok_or_else(|| Error::Invalid("Could not find your home folder.".into()))?;
+    Ok(PathBuf::from(home).join(".claude.json"))
+}
+
+/// Whether `pataka-mail` is registered for every Claude Code (user scope).
+pub fn mail_registered() -> bool {
+    user_config_path()
+        .ok()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .is_some_and(|v| v["mcpServers"][crate::mail::SERVER_NAME].is_object())
+}
+
+/// The MCP server entry for Pātaka Mail. Its address is `PATAKA_MAIL_URL`,
+/// which Claude Code expands, so the secret path is never in a command line
+/// or in `~/.claude.json`.
+pub fn mail_server_entry() -> Value {
+    json!({"type": "http", "url": "${PATAKA_MAIL_URL}"})
+}
+
+/// `--mcp-config` arguments registering Pātaka Mail for one session.
+pub fn mail_mcp_args() -> Vec<String> {
+    let mcp = json!({"mcpServers": {crate::mail::SERVER_NAME: mail_server_entry()}});
+    vec!["--mcp-config".into(), mcp.to_string()]
+}
+
+/// Flag-level settings for one Claude Code session started by Pātaka (the
+/// `pataka` command or the app): its proxy's address, which outranks a
+/// `pataka service` address in the user's settings, and, with mail, Pātaka
+/// Mail's address and (given the `pataka` program) the PreToolUse guard for
+/// its tools.
+pub fn session_settings(base_url: &str, mail: bool, guard_exe: Option<&str>) -> Value {
+    let mut s = json!({"env": {
+        "ANTHROPIC_BASE_URL": base_url,
+        "PATAKA_HOOK_URL": format!("{base_url}/pataka/check-prompt"),
+    }});
+    if mail {
+        s["env"]["PATAKA_MAIL_URL"] = format!("{base_url}/pataka/mcp").into();
+        // The only mail tools are Pātaka's own: claude.ai connectors would
+        // read mail on Anthropic's side, unredacted.
+        s["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false".into();
+        if let Some(exe) = guard_exe {
+            s["hooks"] = json!({"PreToolUse": [{
+                "matcher": "mcp__pataka-mail__.*",
+                "hooks": [{"type": "command", "command": command(exe, "pretool")}]}]});
+        }
+    }
+    s
+}
+
+/// A settings file only this user can read, removed when dropped. Passed
+/// with `--settings`, so its secret address is not in the process list.
+pub struct SettingsFile {
+    dir: PathBuf,
+}
+
+impl SettingsFile {
+    pub fn write(v: &Value) -> Result<SettingsFile> {
+        let dir = std::env::temp_dir().join(format!("pataka-{}", crate::agent_proxy::new_token()));
+        std::fs::create_dir(&dir)?;
+        crate::store::restrict(&dir);
+        let f = SettingsFile { dir };
+        crate::store::write_atomic(&f.path(), v.to_string().as_bytes())?;
+        Ok(f)
+    }
+
+    pub fn path(&self) -> PathBuf {
+        self.dir.join("settings.json")
+    }
+}
+
+impl Drop for SettingsFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 pub fn settings_path() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         return Ok(PathBuf::from(dir).join("settings.json"));
