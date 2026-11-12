@@ -156,7 +156,7 @@ Pātaka always asks before a change:
 
 While a mailbox is connected, `pataka claude` also switches off claude.ai connectors (such as the Gmail connector) for its sessions, by setting `ENABLE_CLAUDEAI_MCP_SERVERS=false`. Those connectors run on Anthropic's side and would read your mail there without redaction. So Claude has only one way to reach your mail: `pataka-mail`.
 
-If you also use the Tūmataiti mod, it redacts tool results inside Claude Code before Claude Code stores them. In a `pataka claude` session with mail (where `PATAKA_MAIL_URL` is set), the mod puts real values back into `pataka-mail` arguments as well, so message ids and names survive the round trip. Update the mod to 0.1.1 or later.
+If you also use the Tūmataiti mod, it redacts tool results inside Claude Code before Claude Code stores them. It leaves `pataka-mail` arguments as placeholders, and Pātaka Mail's server puts the real values back when the call arrives, so Claude Code's auto mode reviews the same call that runs. Update the mod to 0.1.4 or later.
 
 ### Inbox triage
 
@@ -201,7 +201,7 @@ This puts back the labels, flags or folder the messages had, and writes its own 
 
 ### What goes where
 
-- **Anthropic** never sees your mail unredacted. Pātaka Mail redacts every result itself, with your kaupapa and lists, before Claude Code receives it, and puts real values back into Claude's tool calls on your computer. The same happens whichever app runs Claude Code. Message bodies are cut at about 20 KB. Attachments are listed by name and size only: their content is never read or sent. Because results arrive redacted, Claude Code's own display of a tool result shows placeholders.
+- **Anthropic** never sees your mail unredacted. Pātaka Mail redacts every result itself, with your kaupapa and lists, before Claude Code receives it, and puts real values back into Claude's calls to it when they reach its server on your computer. The same happens whichever app runs Claude Code. Message bodies are cut at about 20 KB. Attachments are listed by name and size only: their content is never read or sent. Because results arrive redacted, Claude Code's own display of a tool result shows placeholders.
 - **Your mail server** receives real values, such as the name you search for or a label name, over TLS. Pātaka connects only to the server you connected, and to no other host.
 - **The audit log** holds the action, message ids and, for each label or folder, a keyed hash plus a reference into the encrypted `mail.ptk`. It never holds subjects, addresses or message text.
 - **Claude Code's transcripts** (`~/.claude/projects`) hold the messages it read, with real values, just as they do for files.
@@ -211,7 +211,7 @@ This puts back the labels, flags or folder the messages had, and writes its own 
 - Pātaka Mail cannot send email or delete it permanently (`draft` only saves to Drafts), and it does not use OAuth or the Gmail API.
 - On Gmail, search covers All Mail, which leaves out Spam and Trash.
 - On other servers, labels are folders. `label` is not available there, `move` needs the server's MOVE support, and `archive` needs an Archive folder.
-- Real values go back only into `pataka-mail`'s own tool calls. Do not add another MCP server called `pataka-mail` to your Claude Code settings.
+- Real values go back only into `pataka-mail`'s own tool calls, by its server. Do not add another MCP server called `pataka-mail` to your Claude Code settings.
 
 ## Check what was sent
 

@@ -256,7 +256,7 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
         log_request(&json);
     }
     let restore = if rest == "v1/messages" {
-        Some((session.vault.clone(), streaming, session.mail))
+        Some((session.vault.clone(), streaming))
     } else {
         None
     };
@@ -316,6 +316,7 @@ async fn mail_mcp(st: &ProxyState, session: &Session, method: &Method, headers: 
                 .unwrap_or_default()
                 .to_string();
             let host = st.host.clone();
+            let korero = session.korero.clone();
             let session = session.clone();
             let redacted =
                 tokio::task::spawn_blocking(move || redact_texts_as(host.as_ref(), &session, &[text], "mail")).await;
@@ -325,10 +326,28 @@ async fn mail_mcp(st: &ProxyState, session: &Session, method: &Method, headers: 
                     String::new(),
                     Some("Pātaka withheld this result: it contains a term your kaupapa marks tapu."),
                 ),
-                _ => (
-                    String::new(),
-                    Some("Pātaka could not check this result, so it was withheld."),
-                ),
+                failed => {
+                    // Say why in the audit log, so a withheld result can be
+                    // traced. Never the panic message: it can quote the email.
+                    let why = match failed {
+                        Ok(Err(e)) => e.to_string(),
+                        Err(j) if j.is_panic() => "the redactor stopped on this result (a Pātaka bug)".into(),
+                        _ => "the check was cancelled".into(),
+                    };
+                    let _ = audit::append(
+                        &st.host.audit_path(),
+                        audit::Entry {
+                            event: "mail-withheld".into(),
+                            korero: Some(korero),
+                            detail: Some(why),
+                            ..Default::default()
+                        },
+                    );
+                    (
+                        String::new(),
+                        Some("Pātaka could not check this result, so it was withheld."),
+                    )
+                }
             };
             match error {
                 None => v["result"]["content"][0]["text"] = Value::String(text),
@@ -578,7 +597,7 @@ async fn forward(
     target: &str,
     headers: &HeaderMap,
     body: Option<String>,
-    restore: Option<(Arc<Mutex<Vault>>, bool, bool)>,
+    restore: Option<(Arc<Mutex<Vault>>, bool)>,
 ) -> Response {
     let mut req = st.client.request(method, target);
     for (name, value) in headers {
@@ -608,7 +627,7 @@ async fn forward(
             out = out.header(name, value);
         }
     }
-    let Some((vault, streaming, mail)) = restore.filter(|_| status.is_success()) else {
+    let Some((vault, streaming)) = restore.filter(|_| status.is_success()) else {
         return out
             .body(Body::from_stream(resp.bytes_stream()))
             .expect("response builds");
@@ -620,7 +639,7 @@ async fn forward(
         let bytes = resp.bytes().await.unwrap_or_default();
         let body = match serde_json::from_slice::<Value>(&bytes) {
             Ok(mut v) => {
-                redact::restore_response(&mut v, &vault.lock().unwrap_or_else(|p| p.into_inner()), mail);
+                redact::restore_response(&mut v, &vault.lock().unwrap_or_else(|p| p.into_inner()));
                 v.to_string()
             }
             Err(_) => String::from_utf8_lossy(&bytes).to_string(),
@@ -632,7 +651,7 @@ async fn forward(
         (
             resp.bytes_stream(),
             Vec::<u8>::new(),
-            redact::StreamRestorer::new(mail),
+            redact::StreamRestorer::default(),
             vault,
             false,
         ),

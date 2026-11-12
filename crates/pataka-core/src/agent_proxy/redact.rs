@@ -40,19 +40,14 @@ pub const LOCAL_TOOLS: [&str; 16] = [
     "ExitPlanMode",
 ];
 
-/// Whether a tool's arguments get real values. `mail` is set only for
-/// sessions that registered Pātaka's own mail server (`pataka claude` with a
-/// connected mailbox): its tools (`mcp__pataka-mail__*`) act on the person's
-/// own mail server and need real names to search it. Every other MCP tool
-/// keeps its placeholders.
-pub fn restores_input(tool: &str, mail: bool) -> bool {
-    LOCAL_TOOLS.contains(&tool) || (mail && is_mail_tool(tool))
-}
-
-/// A tool of Pātaka's own mail server.
-pub fn is_mail_tool(tool: &str) -> bool {
-    tool.strip_prefix(crate::mail::TOOL_PREFIX)
-        .is_some_and(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+/// Whether a tool's arguments get real values in Claude's response. Only
+/// local tools do. Every MCP tool keeps its placeholders, Pātaka Mail's
+/// included: its server puts the session's real values back itself when the
+/// call arrives (`agent_proxy::mail_mcp`). So Claude Code runs, shows and
+/// auto mode reviews one and the same input, and a call is never rewritten
+/// between the review and the run.
+pub fn restores_input(tool: &str) -> bool {
+    LOCAL_TOOLS.contains(&tool)
 }
 
 const WITHHELD: &str = "[image or document withheld by Pātaka: it cannot be checked for personal information]";
@@ -321,7 +316,7 @@ pub fn restore_strings(v: &mut Value, vault: &Vault) {
 }
 
 /// Restore a whole (non-streamed) Messages API response.
-pub fn restore_response(body: &mut Value, vault: &Vault, mail: bool) {
+pub fn restore_response(body: &mut Value, vault: &Vault) {
     if let Some(Value::Array(blocks)) = body.get_mut("content") {
         for b in blocks {
             match b["type"].as_str().unwrap_or("") {
@@ -332,7 +327,7 @@ pub fn restore_response(body: &mut Value, vault: &Vault, mail: bool) {
                 }
                 "tool_use" => {
                     let name = b["name"].as_str().unwrap_or("").to_string();
-                    if restores_input(&name, mail) {
+                    if restores_input(&name) {
                         if let Some(input) = b.get_mut("input") {
                             restore_strings(input, vault);
                         }
@@ -359,8 +354,6 @@ struct BlockState {
 #[derive(Default)]
 pub struct StreamRestorer {
     blocks: std::collections::HashMap<u64, BlockState>,
-    /// Restore `mcp__pataka-mail__*` arguments too (see `restores_input`).
-    pub mail: bool,
 }
 
 /// Longest text held back waiting for a placeholder to close.
@@ -371,13 +364,6 @@ fn sse(event: &str, data: &Value) -> String {
 }
 
 impl StreamRestorer {
-    pub fn new(mail: bool) -> Self {
-        StreamRestorer {
-            mail,
-            ..Default::default()
-        }
-    }
-
     fn split_safe(pending: &str) -> usize {
         match pending.rfind('[') {
             Some(i) if !pending[i..].contains(']') && pending.len() - i <= HOLD_LIMIT => i,
@@ -445,7 +431,7 @@ impl StreamRestorer {
                         } else {
                             match serde_json::from_str::<Value>(&st.json) {
                                 Ok(mut input) => {
-                                    if restores_input(&st.tool, self.mail) {
+                                    if restores_input(&st.tool) {
                                         restore_strings(&mut input, vault);
                                     }
                                     input.to_string()
@@ -592,11 +578,7 @@ mod tests {
     }
 
     fn tool_stream(name: &str, v: &Vault) -> Value {
-        tool_stream_in(name, v, false)
-    }
-
-    fn tool_stream_in(name: &str, v: &Vault, mail: bool) -> Value {
-        let mut r = StreamRestorer::new(mail);
+        let mut r = StreamRestorer::default();
         let mut out = r.event(
             "content_block_start",
             &json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t","name":name,"input":{}}}).to_string(),
@@ -673,38 +655,20 @@ mod tests {
     }
 
     #[test]
-    fn mail_tools_are_restored_only_in_mail_sessions() {
-        let v = vault_with(&[("[PERSON_1]", "Aroha")]);
-        // A session that registered Pātaka Mail: its tools get real values…
-        assert_eq!(
-            tool_stream_in("mcp__pataka-mail__search", &v, true)["command"],
-            "echo Aroha > a.txt"
-        );
-        // …every other MCP tool keeps its placeholders, even then.
-        for other in [
-            "mcp__slack__send",
-            "mcp__pataka-mailer__search",
-            "mcp__pataka-mail__",
-            "mcp__pataka-mail__x/y",
-        ] {
-            assert_eq!(
-                tool_stream_in(other, &v, true)["command"],
-                "echo [PERSON_1] > a.txt",
-                "{other}"
-            );
+    fn mail_tools_keep_placeholders_for_their_server_to_restore() {
+        // Pātaka Mail's server restores its own arguments, so Claude Code
+        // gets the same input auto mode reviewed (no rewrite in between).
+        let v = vault_with(&[("[PERSON_1]", "real-value")]);
+        for tool in ["mcp__pataka-mail__search", "mcp__slack__send"] {
+            assert_eq!(tool_stream(tool, &v)["command"], "echo [PERSON_1] > a.txt", "{tool}");
         }
-        // Without mail, the mail tools keep placeholders too.
-        assert_eq!(
-            tool_stream_in("mcp__pataka-mail__search", &v, false)["command"],
-            "echo [PERSON_1] > a.txt"
-        );
         let mut body = json!({"content": [
             {"type": "tool_use", "name": "mcp__pataka-mail__label", "input": {"add": ["[PERSON_1]"]}},
-            {"type": "tool_use", "name": "mcp__gmail__label", "input": {"add": ["[PERSON_1]"]}}
+            {"type": "tool_use", "name": "Write", "input": {"content": "[PERSON_1]"}}
         ]});
-        restore_response(&mut body, &v, true);
-        assert_eq!(body["content"][0]["input"]["add"][0], "Aroha");
-        assert_eq!(body["content"][1]["input"]["add"][0], "[PERSON_1]");
+        restore_response(&mut body, &v);
+        assert_eq!(body["content"][0]["input"]["add"][0], "[PERSON_1]");
+        assert_eq!(body["content"][1]["input"]["content"], "real-value");
     }
 
     #[test]
@@ -715,7 +679,7 @@ mod tests {
             {"type": "tool_use", "name": "Write", "input": {"content": "for [PERSON_1]"}},
             {"type": "tool_use", "name": "WebFetch", "input": {"url": "https://x/?q=[PERSON_1]"}}
         ]});
-        restore_response(&mut body, &v, false);
+        restore_response(&mut body, &v);
         assert_eq!(body["content"][0]["text"], "Hi Aroha");
         assert_eq!(body["content"][1]["input"]["content"], "for Aroha");
         assert_eq!(body["content"][2]["input"]["url"], "https://x/?q=[PERSON_1]");
