@@ -151,9 +151,11 @@
       </div>
 
       <section data-panel="providers" class="panel">
-        <p class="muted">Pātaka marks a provider <em>on this device</em> only when its address is this computer. Mark a remote provider <em>sovereign</em> only if you or your community control where it runs. Tapu kōrero may only use on-device and sovereign providers.</p>
-        <div id="provider-cards"></div>
-        <button id="add-provider">+ Add a provider</button>
+        <div class="panel-head">
+          <p class="muted">The models Pātaka can talk to. Anything that leaves this device is redacted by Tūmataiti first.</p>
+          <button id="connect-open" class="primary">+ Connect a model</button>
+        </div>
+        <ul id="provider-list" class="provider-list"></ul>
       </section>
 
       <section data-panel="policy" class="panel hidden">
@@ -237,6 +239,63 @@
         <p class="muted">Redaction reduces risk; it does not remove it. Tūmataiti's rules find structured identifiers, and its name model finds most names, addresses and affiliation, but no detector catches everything: read what will be sent. Decisions about mātauranga belong to the people it comes from: the tool flags, people decide.</p>
         <p class="muted small">Detector: <code id="about-detector"></code>. Pātaka is open source under the Apache 2.0 licence.</p>
       </section>
+    </div>
+  </dialog>
+
+  <!-- Connect a model -->
+  <dialog id="connect" class="medium">
+    <div class="dialog-body">
+      <div class="settings-head">
+        <h2 id="connect-title">Connect a model</h2>
+        <button id="connect-close" aria-label="Close">✕</button>
+      </div>
+
+      <div id="connect-choose">
+        <div id="connect-groups"></div>
+      </div>
+
+      <form id="connect-form" class="hidden" autocomplete="off">
+        <p id="connect-blurb" class="muted"></p>
+        <p id="connect-where" class="dest"></p>
+
+        <div id="cf-cli" class="hidden">
+          <div id="cf-cli-status" class="status-box">Checking…</div>
+          <div class="row"><button type="button" id="cf-cli-check">Check again</button></div>
+          <p id="cf-cli-warning" class="warning hidden"></p>
+          <label id="cf-cli-ack-label" class="check hidden"><input type="checkbox" id="cf-cli-ack"> I understand, connect it anyway</label>
+        </div>
+
+        <label id="cf-key-label" class="hidden">API key
+          <input type="password" id="cf-key" autocomplete="off" spellcheck="false">
+        </label>
+        <p id="cf-key-help" class="hint hidden"></p>
+
+        <label id="cf-url-label" class="hidden">Server address <input id="cf-url" placeholder="https://… or http://localhost:…" spellcheck="false"></label>
+        <label id="cf-trust-label" class="hidden">Who runs this server?
+          <select id="cf-trust">
+            <option value="offshore">A third-party service</option>
+            <option value="sovereign">Us: infrastructure we or our community control</option>
+          </select>
+        </label>
+
+        <details id="cf-advanced">
+          <summary>More options</summary>
+          <label>Name <input id="cf-name" maxlength="80"></label>
+          <label id="cf-juris-label">Where it processes data <input id="cf-juris" maxlength="80"></label>
+          <label id="cf-path-label" class="hidden">App location (leave empty to find it automatically) <input id="cf-path" spellcheck="false"></label>
+          <label>Models, one per line <textarea id="cf-models" rows="3" spellcheck="false"></textarea></label>
+          <label id="cf-effort-label" class="hidden">Effort
+            <select id="cf-effort"><option value="">(default)</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
+          </label>
+          <label>Max tokens per reply <input type="number" id="cf-max" min="1" max="128000"></label>
+        </details>
+
+        <p id="connect-error" class="error" role="alert"></p>
+        <div class="dialog-actions">
+          <button type="button" id="connect-back">Back</button>
+          <button type="submit" id="connect-submit" class="primary">Connect</button>
+        </div>
+      </form>
     </div>
   </dialog>
 

@@ -72,6 +72,8 @@ pub fn run() {
             commands::export_conversation,
             commands::audit_entries,
             commands::audit_verify,
+            commands::provider_templates,
+            commands::cli_status,
             commands::model_status,
             commands::model_install,
             commands::model_remove,

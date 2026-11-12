@@ -273,3 +273,26 @@ th { font-weight: 600; color: var(--muted); }
 .model-box { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; }
 .model-box h3 { margin: 0 0 4px; }
 .ok { color: var(--accent); }
+
+/* Providers and the connect dialog */
+dialog.medium { width: min(640px, 94vw); }
+.panel-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.panel-head p { margin: 0; }
+.provider-list { list-style: none; padding: 0; margin: 0; }
+.provider-list li { display: flex; align-items: center; gap: 12px; padding: 10px 4px; border-bottom: 1px solid var(--line); }
+.provider-list .pinfo { flex: 1; min-width: 0; }
+.provider-list .pname { font-weight: 600; }
+.provider-list .psub { font-size: 13px; color: var(--muted); }
+.provider-list .empty-row { color: var(--muted); justify-content: center; padding: 24px; }
+.group-title { margin: 14px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.tile { text-align: left; padding: 10px 12px; border-radius: var(--radius); display: flex; flex-direction: column; gap: 4px; }
+.tile strong { font-size: 15px; }
+.tile span { font-size: 12px; color: var(--muted); }
+.tile.done { opacity: .6; }
+.status-box { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); }
+.status-box.ok { border-color: var(--accent); }
+.status-box.bad { border-color: var(--ochre); }
+.warning { border-left: 3px solid var(--ochre); padding: 6px 10px; background: var(--bg); font-size: 13px; }
+details#cf-advanced { margin: 10px 0; }
+details#cf-advanced summary { cursor: pointer; color: var(--muted); }

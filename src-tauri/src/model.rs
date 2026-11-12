@@ -30,6 +30,17 @@ pub enum ProviderKind {
     /// The OpenAI chat-completions shape, used by OpenAI, DeepSeek, Qwen
     /// (DashScope), Mistral, OpenRouter, Ollama, LM Studio, llama.cpp and others.
     OpenaiCompatible,
+    /// A Claude subscription, through the signed-in Claude Code app.
+    ClaudeCode,
+    /// A ChatGPT subscription, through the signed-in Codex app.
+    Codex,
+}
+
+impl ProviderKind {
+    /// Runs a local, signed-in vendor app rather than calling an HTTP API.
+    pub fn is_cli(self) -> bool {
+        matches!(self, ProviderKind::ClaudeCode | ProviderKind::Codex)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +59,9 @@ pub struct Provider {
     pub effort: Option<String>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    /// Subscription apps only: full path to `claude` or `codex`, if not found automatically.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -135,7 +149,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            providers: crate::providers::presets(),
+            // Nothing is connected until the person chooses (Settings → Connect a model).
+            providers: Vec::new(),
             api_keys: BTreeMap::new(),
             kaupapa: Kaupapa::default(),
             retention_days: 0,

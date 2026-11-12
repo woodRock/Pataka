@@ -636,10 +636,31 @@ fn valid_provider(mut p: Provider) -> Result<Provider> {
     if p.id.len() > 64 || !p.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(Error::Invalid("bad provider id".into()));
     }
-    p.base_url = sovereignty::validate_base_url(&p.base_url)?
-        .to_string()
-        .trim_end_matches('/')
-        .to_string();
+    if p.kind.is_cli() {
+        // The app decides where it connects; record the vendor's host so the
+        // destination and jurisdiction shown are honest.
+        p.base_url = match p.kind {
+            ProviderKind::ClaudeCode => "https://api.anthropic.com".into(),
+            _ => "https://chatgpt.com".into(),
+        };
+        p.jurisdiction = "United States".into();
+        p.effort = None;
+        p.command = p.command.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+        if let Some(c) = &p.command {
+            let path = std::path::Path::new(c);
+            if !path.is_absolute() || !path.is_file() || c.len() > 1024 {
+                return Err(Error::Invalid(
+                    "Enter the full path to the app, or leave it empty to find it automatically.".into(),
+                ));
+            }
+        }
+    } else {
+        p.command = None;
+        p.base_url = sovereignty::validate_base_url(&p.base_url)?
+            .to_string()
+            .trim_end_matches('/')
+            .to_string();
+    }
     p.models = p
         .models
         .into_iter()
@@ -808,6 +829,20 @@ pub fn save_kaupapa(state: State<'_, AppState>, kaupapa: Kaupapa) -> Result<Sett
         }
         Ok(settings_view(&state, &s.settings))
     })
+}
+
+#[tauri::command]
+pub fn provider_templates() -> Vec<providers::Template> {
+    providers::templates()
+}
+
+/// Is Claude Code or Codex installed here, and signed in?
+#[tauri::command]
+pub async fn cli_status(kind: ProviderKind, command: Option<String>) -> Result<providers::cli::CliStatus> {
+    if !kind.is_cli() {
+        return Err(Error::Invalid("not a subscription app".into()));
+    }
+    Ok(providers::cli::status(kind, command.as_deref()).await)
 }
 
 // ---------------------------------------------------------------- kōrero
@@ -1482,10 +1517,17 @@ mod tests {
         let settings = Settings::default();
         let mut c = conv(vec![]);
         c.classification = Classification::Tapu;
-        let p = settings.providers.iter().find(|p| p.id == "anthropic").unwrap();
+        let tpl = |id: &str| {
+            providers::templates()
+                .into_iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .provider
+        };
+        let p = &tpl("anthropic");
         let (preview, _) = prepare(&c, "hello", &settings, p, "claude-opus-5-5", &ModelSpans::default()).unwrap();
         assert!(preview.blocked);
-        let local = settings.providers.iter().find(|p| p.id == "ollama").unwrap();
+        let local = &tpl("ollama");
         let (preview, _) = prepare(&c, "hello", &settings, local, "llama3.2", &ModelSpans::default()).unwrap();
         assert!(!preview.blocked);
         assert!(!preview.leaves_device);
@@ -1493,7 +1535,12 @@ mod tests {
 
     #[test]
     fn provider_validation() {
-        let mut p = Settings::default().providers[2].clone();
+        let mut p = providers::templates()
+            .into_iter()
+            .find(|t| t.id == "anthropic")
+            .unwrap()
+            .provider;
+        p.id = "x".into();
         p.base_url = "http://api.example.com".into();
         assert!(valid_provider(p.clone()).is_err());
         p.base_url = "https://api.example.com/".into();
@@ -1501,5 +1548,29 @@ mod tests {
         let v = valid_provider(p).unwrap();
         assert_eq!(v.trust, Trust::Offshore);
         assert_eq!(v.base_url, "https://api.example.com");
+    }
+
+    #[test]
+    fn subscription_apps_are_offshore_whatever_is_claimed() {
+        let mut p = providers::templates()
+            .into_iter()
+            .find(|t| t.id == "claude-code")
+            .unwrap()
+            .provider;
+        p.trust = Trust::Sovereign;
+        p.base_url = "http://localhost:1".into();
+        p.command = Some("relative/claude".into());
+        assert!(valid_provider(p.clone()).is_err(), "relative paths are refused");
+        p.command = None;
+        let v = valid_provider(p).unwrap();
+        assert_eq!(v.trust, Trust::Offshore);
+        assert_eq!(v.base_url, "https://api.anthropic.com");
+        let mut c = Conversation {
+            classification: Classification::Tapu,
+            ..conv(vec![])
+        };
+        c.id = new_id();
+        let (preview, _) = prepare(&c, "hi", &Settings::default(), &v, "sonnet", &ModelSpans::default()).unwrap();
+        assert!(preview.blocked, "tapu kōrero never go to a subscription app");
     }
 }

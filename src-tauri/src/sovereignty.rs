@@ -45,6 +45,10 @@ pub fn validate_base_url(raw: &str) -> Result<Url> {
 
 /// The trust level Pātaka will actually use for a provider.
 pub fn effective_trust(p: &Provider) -> Trust {
+    // A subscription app runs here but sends everything to its vendor.
+    if p.kind.is_cli() {
+        return Trust::Offshore;
+    }
     match Url::parse(&p.base_url) {
         Ok(u) if is_loopback_host(&u) => Trust::Device,
         // A remote host can never be Device, whatever is stored.
@@ -80,6 +84,7 @@ mod tests {
             trust,
             effort: None,
             max_tokens: 1000,
+            command: None,
         }
     }
 

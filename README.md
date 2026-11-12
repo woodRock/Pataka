@@ -1,6 +1,6 @@
 # Pātaka
 
-A desktop AI chat client for macOS, Windows and Linux, grounded in Māori data sovereignty. Talk to Claude, OpenAI, DeepSeek, Qwen, Mistral or a model running on your own computer (Ollama, LM Studio). Before anything reaches a cloud model, [Tūmataiti](https://github.com/woodRock/tumataiti) redacts personal and culturally sensitive details **on your device**. Replies are restored locally, so you read a natural answer while the provider only ever sees placeholders.
+A desktop AI chat client for macOS, Windows and Linux, grounded in Māori data sovereignty. Talk to Claude, ChatGPT, DeepSeek, Qwen, Mistral or a model running on your own computer (Ollama, LM Studio), with an API key or with the Claude or ChatGPT subscription you already have. Before anything reaches a cloud model, [Tūmataiti](https://github.com/woodRock/tumataiti) redacts personal and culturally sensitive details **on your device**. Replies are restored locally, so you read a natural answer while the provider only ever sees placeholders.
 
 Built with Rust and [Tauri 2](https://tauri.app). The window is plain HTML, CSS and JavaScript with no runtime npm dependencies.
 
@@ -8,6 +8,7 @@ Built with Rust and [Tauri 2](https://tauri.app). The window is plain HTML, CSS 
 
 ## What it does
 
+- **Use your subscription, or an API key.** Like [T3 Code](https://github.com/pingdotgg/t3code), Pātaka can run the official Claude Code and Codex apps you are already signed in to, so a Claude Pro/Max or ChatGPT plan works without an API key. Pātaka never sees that login. It sends the apps only Tūmataiti-redacted text and runs them locked down for chat: Claude Code with no tools, MCP servers, settings or saved sessions, and Codex in a read-only sandbox that Pātaka stops if Codex tries to act on the computer.
 - **Local redaction with Tūmataiti, rules and model.** The Tūmataiti rules find IRD numbers (mod-11 checked), NHI numbers, bank accounts, payment cards (Luhn checked), passports and driver licences, NZ phone numbers, emails, URLs, IP addresses, labelled dates of birth or death, and API keys or passwords. The **Tūmataiti name model** (DeBERTa-v3-small, fine-tuned on NZ and te reo Māori text) finds people's names, addresses and affiliation (iwi, hapū, marae) in context. It runs natively on your device through ONNX Runtime. **Kaitiaki lists** that you or your data steward maintain add names, places and tapu terms. Everything is merged by Tūmataiti's own review and merge steps. Each item is pseudonymised (`[PERSON_1]`), generalised (`[YEAR 1984]`), masked (`[NZ_GOV_ID]`) or blocked, per a policy you control.
 - **Consistent placeholders across a kōrero.** The same person keeps the same placeholder across every turn. When a message goes to the cloud, the whole history is redacted again under the current policy, so a term added later also protects earlier turns.
 - **Review before sending.** See exactly what the model will receive, with each placeholder highlighted. You can add something else to redact, or allow a term through, before you send.
@@ -46,7 +47,10 @@ shasum -a 256 -c SHA256SUMS --ignore-missing # macOS
 ## Getting started
 
 1. Open Pātaka and choose how to protect your data: a **passphrase** (recommended) or the **OS keychain**.
-2. Open **Settings → Providers**. For a local model, start [Ollama](https://ollama.com) and press **Fetch models** on the Ollama card. For a cloud model, paste an API key into its card. Keys are stored encrypted and never shown again.
+2. Choose **Connect a model** (in **Settings → Providers**, or at the end of the model menu) and pick one:
+   - **On this device:** start [Ollama](https://ollama.com) or LM Studio first; Pātaka lists its models.
+   - **Your subscription:** install [Claude Code](https://claude.com/claude-code) or [Codex](https://developers.openai.com/codex/cli) and sign in once in a terminal (`claude auth login` or `codex login`). Pātaka finds the app and checks you are signed in.
+   - **API key:** paste a key. It is stored encrypted and never shown again.
 3. Open **Settings → Tūmataiti** and press **Install** under *Name model*. This is a one-time download of about 170 MB (250 MB on Windows): the model from Hugging Face and ONNX Runtime from Microsoft's GitHub release. Every file is checked against a SHA-256 built into Pātaka.
 4. Open **Settings → Kaitiaki lists** and add the names, marae, hapū, places and tapu terms that should always be protected, whatever the model finds.
 5. Start a **Kōrero hou** (general) or a **Tapu** kōrero (on-device or sovereign models only).
@@ -85,7 +89,8 @@ src-tauri/src/
   crypto.rs        XChaCha20-Poly1305 and Argon2id
   store.rs         encrypted files, keychain or passphrase key, secure delete
   audit.rs         hash-chained audit log
-  providers/       Anthropic and OpenAI-compatible streaming clients (the only network code)
+  providers/       Anthropic and OpenAI-compatible streaming clients (the only network code),
+                   and cli.rs, which runs the signed-in Claude Code or Codex app for subscriptions
   commands.rs      what the window may call
 ui/                window: index.html, styles.css, app.js, markdown.js (safe, DOM-only renderer)
 scripts/           build, checksum, check and hook scripts

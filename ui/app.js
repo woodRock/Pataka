@@ -411,12 +411,16 @@ for (const b of document.querySelectorAll('.class-toggle button')) {
 
 // ------------------------------------------------------------ provider / model
 
-function fillProviderSelect() {
+function fillProviderSelect(preferId) {
   const s = state.settings;
   const sel = $('provider-select');
-  sel.replaceChildren(...s.providers.map((p) => el('option', { value: p.id, text: `${p.name}${p.effectiveTrust === 'device' ? '' : p.hasKey || p.kind !== 'anthropic' ? '' : ' (no key)'}` })));
-  const pick = s.providers.find((p) => p.id === s.lastProvider) || s.providers.find((p) => p.effectiveTrust === 'device') || s.providers[0];
-  if (pick) sel.value = pick.id;
+  sel.replaceChildren(
+    ...s.providers.map((p) => el('option', { value: p.id, text: p.name + (p.kind === 'anthropic' && !p.hasKey ? ' (no key)' : '') })),
+    el('option', { value: '__connect', text: '+ Connect a model…' }),
+  );
+  const pick = s.providers.find((p) => p.id === preferId) || s.providers.find((p) => p.id === s.lastProvider)
+    || s.providers.find((p) => p.effectiveTrust === 'device') || s.providers[0];
+  sel.value = pick ? pick.id : '__connect';
   fillModelSelect(s.lastModel);
 }
 
@@ -429,12 +433,17 @@ function fillModelSelect(prefer) {
   const sel = $('model-select');
   const models = p ? p.models : [];
   sel.replaceChildren(...models.map((m) => el('option', { value: m, text: m })));
-  if (!models.length) sel.append(el('option', { value: '', text: 'No models: add or fetch them in Settings' }));
+  if (!models.length) sel.append(el('option', { value: '', text: p ? 'No models: edit it in Settings' : 'Connect a model first' }));
   if (prefer && models.includes(prefer)) sel.value = prefer;
   updateRoute();
 }
 
 $('provider-select').addEventListener('change', () => {
+  if ($('provider-select').value === '__connect') {
+    fillProviderSelect();
+    attempt(() => openConnect());
+    return;
+  }
   fillModelSelect();
   attempt(() => call('set_last_selection', { providerId: $('provider-select').value, model: $('model-select').value }));
 });
@@ -456,8 +465,9 @@ function updateRoute() {
   const badge = $('destination');
   const note = $('route-note');
   if (!p) {
-    badge.textContent = '';
-    note.textContent = '';
+    badge.className = 'badge';
+    badge.textContent = 'No model connected';
+    note.textContent = 'Connect a model to start: on this device, your Claude or ChatGPT subscription, or an API key.';
     return;
   }
   const trust = p.effectiveTrust;
@@ -698,83 +708,223 @@ function renderSettings() {
   $('about-detector').textContent = s.detector;
 }
 
-function renderProviders() {
-  const cards = state.settings.providers.map(providerCard);
-  $('provider-cards').replaceChildren(...cards);
-}
+const KIND_TEXT = {
+  anthropic: 'Anthropic API',
+  openai_compatible: 'OpenAI-compatible API',
+  claude_code: 'Claude subscription (Claude Code)',
+  codex: 'ChatGPT subscription (Codex)',
+};
 
-function providerCard(p) {
-  const isNew = !p.id;
-  const f = {
-    name: el('input', { value: p.name }),
-    kind: el('select', {}, el('option', { value: 'openai_compatible', text: 'OpenAI-compatible' }), el('option', { value: 'anthropic', text: 'Anthropic' })),
-    baseUrl: el('input', { value: p.baseUrl, placeholder: 'https://… or http://localhost:…' }),
-    jurisdiction: el('input', { value: p.jurisdiction, placeholder: 'Where data is processed' }),
-    trust: el('select', { disabled: p.effectiveTrust === 'device' },
-      el('option', { value: 'offshore', text: 'Third-party cloud' }),
-      el('option', { value: 'sovereign', text: 'Sovereign: infrastructure we control' }),
-      p.effectiveTrust === 'device' ? el('option', { value: 'device', text: 'On this device (detected from the address)' }) : null),
-    models: el('textarea', { rows: '3' }),
-    effort: el('select', {}, ...['', 'low', 'medium', 'high', 'xhigh', 'max'].map((e) => el('option', { value: e, text: e || '(default)' }))),
-    maxTokens: el('input', { type: 'number', min: '1', max: '128000', value: String(p.maxTokens) }),
-    key: el('input', { type: 'password', placeholder: p.hasKey ? 'A key is stored (hidden). Type to replace it.' : 'API key', autocomplete: 'off' }),
-  };
-  f.kind.value = p.kind;
-  f.trust.value = p.effectiveTrust === 'device' ? 'device' : p.trust === 'sovereign' ? 'sovereign' : 'offshore';
-  f.models.value = p.models.join('\n');
-  f.effort.value = p.effort || '';
-  const trustBadge = el('span', { class: `badge ${p.effectiveTrust}`, text: TRUST_TEXT[p.effectiveTrust] });
-  const collect = () => ({
-    id: p.id || '',
-    name: f.name.value,
-    kind: f.kind.value,
-    baseUrl: f.baseUrl.value,
-    models: f.models.value.split(/[\n,]/).map((m) => m.trim()).filter(Boolean),
-    jurisdiction: f.jurisdiction.value,
-    trust: f.trust.value,
-    effort: f.effort.value || null,
-    maxTokens: Number(f.maxTokens.value) || 4096,
-  });
-  const save = async () => {
-    state.settings = await call('save_provider', { provider: collect() });
-    renderProviders();
-    toast('Provider saved.');
-  };
-  return el('div', { class: 'provider-card' },
-    el('h4', {}, el('span', { text: isNew ? 'New provider' : p.name }), isNew ? null : trustBadge, p.hasKey ? el('span', { class: 'small muted', text: '· key stored' }) : null),
-    el('div', { class: 'grid2' },
-      el('label', {}, 'Name', f.name),
-      el('label', {}, 'API type', f.kind),
-      el('label', {}, 'Base URL', f.baseUrl),
-      el('label', {}, 'Where it processes data', f.jurisdiction),
-      el('label', {}, 'Trust (on-device is detected from the address)', f.trust),
-      el('label', {}, 'Max tokens per reply', f.maxTokens),
-      el('label', {}, 'Models (one per line)', f.models),
-      el('label', {}, 'Effort (Anthropic only)', f.effort)),
-    el('div', { class: 'row' },
-      el('button', { class: 'primary', text: 'Save', onclick: () => attempt(save) }),
-      isNew ? null : el('button', { text: 'Fetch models', onclick: () => attempt(async () => {
-        state.settings = await call('fetch_models', { providerId: p.id });
-        renderProviders();
-        toast('Model list updated.');
-      }) }),
-      isNew ? null : el('button', { class: 'danger', text: 'Delete', onclick: () => attempt(async () => {
-        if (!confirm(`Delete ${p.name} and its stored key?`)) return;
+function renderProviders() {
+  const list = $('provider-list');
+  const ps = state.settings.providers;
+  if (!ps.length) {
+    list.replaceChildren(el('li', { class: 'empty-row', text: 'No models connected yet. Choose “Connect a model” to add one.' }));
+    return;
+  }
+  list.replaceChildren(...ps.map((p) => {
+    const bits = [KIND_TEXT[p.kind] || p.kind, TRUST_TEXT[p.effectiveTrust]];
+    if (p.effectiveTrust !== 'device') bits.push(p.jurisdiction);
+    bits.push(p.models.length ? `${p.models.length} model${p.models.length === 1 ? '' : 's'}` : 'no models yet');
+    if (p.kind === 'anthropic' || (p.kind === 'openai_compatible' && p.effectiveTrust !== 'device')) bits.push(p.hasKey ? 'key stored' : 'no key');
+    return el('li', {},
+      el('span', { class: `badge ${p.effectiveTrust}`, text: p.effectiveTrust === 'device' ? 'device' : p.effectiveTrust === 'sovereign' ? 'sovereign' : 'cloud' }),
+      el('div', { class: 'pinfo' }, el('div', { class: 'pname', text: p.name }), el('div', { class: 'psub', text: bits.join(' · ') })),
+      el('button', { text: 'Edit', onclick: () => attempt(() => openConnect(p)) }),
+      el('button', { class: 'danger', text: 'Remove', onclick: () => attempt(async () => {
+        if (!confirm(`Remove ${p.name} and anything stored for it, such as its API key?`)) return;
         state.settings = await call('delete_provider', { providerId: p.id });
         renderProviders();
-      }) })),
-    isNew ? el('p', { class: 'hint', text: 'Save first, then add an API key.' }) : el('div', { class: 'row' },
-      f.key,
-      el('button', { text: 'Save key', onclick: () => attempt(async () => {
-        state.settings = await call('set_api_key', { providerId: p.id, key: f.key.value });
-        f.key.value = '';
-        renderProviders();
-        toast('Key stored, encrypted. It is never shown again.');
-      }) }),
-      p.hasKey ? el('button', { text: 'Remove key', onclick: () => attempt(async () => {
-        state.settings = await call('set_api_key', { providerId: p.id, key: null });
-        renderProviders();
-      }) }) : null));
+        fillProviderSelect();
+      }) }));
+  }));
+}
+
+// ------------------------------------------------------------ connect a model
+
+const connect = { templates: null, template: null, existing: null, cli: null };
+
+const GROUPS = [
+  ['device', 'On this device', 'Nothing leaves your computer. Needs the app running.'],
+  ['subscription', 'Your subscription', 'Uses an app you are already signed in to.'],
+  ['api', 'API key', 'Pay per use with a key from the provider.'],
+  ['custom', 'Something else', ''],
+];
+
+async function openConnect(existing = null) {
+  if (!connect.templates) connect.templates = await call('provider_templates');
+  connect.existing = existing;
+  $('connect-error').textContent = '';
+  if (existing) {
+    const t = connect.templates.find((x) => x.provider.kind === existing.kind && (x.provider.baseUrl === existing.baseUrl || x.provider.kind !== 'openai_compatible'))
+      || connect.templates.find((x) => x.id === 'custom');
+    showConnectForm(t, existing);
+  } else {
+    showConnectChoose();
+  }
+  if (!$('connect').open) $('connect').showModal();
+}
+
+function showConnectChoose() {
+  $('connect-title').textContent = 'Connect a model';
+  $('connect-choose').classList.remove('hidden');
+  $('connect-form').classList.add('hidden');
+  const have = new Set(state.settings.providers.map((p) => `${p.kind}|${p.baseUrl}`));
+  $('connect-groups').replaceChildren(...GROUPS.flatMap(([g, title, sub]) => {
+    const ts = connect.templates.filter((t) => t.group === g);
+    if (!ts.length) return [];
+    return [
+      el('h3', { class: 'group-title', text: title }),
+      sub ? el('p', { class: 'hint', text: sub }) : null,
+      el('div', { class: 'tiles' }, ...ts.map((t) => {
+        const done = t.group !== 'custom' && have.has(`${t.provider.kind}|${t.provider.baseUrl}`);
+        return el('button', { type: 'button', class: `tile${done ? ' done' : ''}`, onclick: () => showConnectForm(t, null) },
+          el('strong', { text: t.title + (done ? ' ✓' : '') }), el('span', { text: t.blurb }));
+      })),
+    ].filter(Boolean);
+  }));
+}
+
+function show(id, on) {
+  $(id).classList.toggle('hidden', !on);
+}
+
+function showConnectForm(t, existing) {
+  connect.template = t;
+  const base = existing || t.provider;
+  const g = t.group;
+  const isCli = base.kind === 'claude_code' || base.kind === 'codex';
+  $('connect-title').textContent = existing ? `Edit ${existing.name}` : t.title;
+  $('connect-choose').classList.add('hidden');
+  $('connect-form').classList.remove('hidden');
+  $('connect-blurb').textContent = t.blurb;
+  $('connect-error').textContent = '';
+  const where = g === 'device'
+    ? 'Runs on this computer. Nothing leaves it.'
+    : isCli
+      ? 'Runs the vendor’s app on this computer, which sends your messages to its servers in the United States after Tūmataiti redacts them. Tapu kōrero cannot use it.'
+      : g === 'custom' ? 'Pātaka works out whether the address is this computer. Mark a remote server as ours only if you or your community control it.'
+        : `Sends redacted messages to ${t.title}, processed in ${base.jurisdiction}. Tapu kōrero cannot use it.`;
+  $('connect-where').textContent = where;
+
+  show('cf-cli', isCli);
+  show('cf-key-label', g === 'api' || g === 'custom');
+  $('cf-key').value = '';
+  $('cf-key').placeholder = existing?.hasKey ? 'A key is stored. Leave empty to keep it.' : g === 'custom' ? 'Only if the server needs one' : 'Paste your API key';
+  show('cf-key-help', !!t.keyUrl);
+  $('cf-key-help').textContent = t.keyUrl ? `Create a key at ${t.keyUrl}. It is stored encrypted on this device and never shown again.` : '';
+  show('cf-url-label', g === 'device' || g === 'custom');
+  show('cf-trust-label', g === 'custom');
+  show('cf-path-label', isCli);
+  show('cf-effort-label', base.kind === 'anthropic');
+  show('cf-juris-label', g === 'custom' || g === 'api');
+
+  $('cf-url').value = base.baseUrl || '';
+  $('cf-trust').value = base.trust === 'sovereign' ? 'sovereign' : 'offshore';
+  $('cf-name').value = base.name || '';
+  $('cf-juris').value = base.jurisdiction || '';
+  $('cf-path').value = base.command || '';
+  $('cf-models').value = (base.models || []).join('\n');
+  $('cf-effort').value = base.effort || '';
+  $('cf-max').value = base.maxTokens || 8192;
+  $('cf-advanced').open = g === 'custom';
+  $('connect-back').textContent = existing ? 'Cancel' : 'Back';
+  $('connect-submit').textContent = existing ? 'Save' : 'Connect';
+
+  const codex = base.kind === 'codex';
+  show('cf-cli-warning', codex);
+  show('cf-cli-ack-label', codex && !existing);
+  $('cf-cli-ack').checked = !!existing;
+  $('cf-cli-warning').textContent = codex
+    ? 'Codex is a coding agent and cannot switch off its command tool. Pātaka runs it in an empty folder with a read-only sandbox and stops it the moment it tries to run a command or change a file, but in the moment before it is stopped it could read files on this computer. Use it only for kōrero that are not sensitive.'
+    : '';
+  if (isCli) checkCli();
+  (isCli ? $('connect-submit') : g === 'device' ? $('cf-url') : $('cf-key')).focus();
+}
+
+async function checkCli() {
+  const kind = (connect.existing || connect.template.provider).kind;
+  const box = $('cf-cli-status');
+  box.className = 'status-box';
+  box.textContent = 'Looking for the app and checking you are signed in…';
+  connect.cli = null;
+  try {
+    const st = await call('cli_status', { kind, command: $('cf-path').value.trim() || null });
+    connect.cli = st;
+    box.className = `status-box ${st.found && st.signedIn ? 'ok' : 'bad'}`;
+    box.replaceChildren(...[
+      el('div', { text: st.detail }),
+      st.path ? el('div', { class: 'small muted', text: `${st.version || ''} ${st.path}`.trim() }) : null,
+    ].filter(Boolean));
+  } catch (e) {
+    box.className = 'status-box bad';
+    box.textContent = e.message;
+  }
+}
+
+$('cf-cli-check').addEventListener('click', () => attempt(checkCli));
+$('connect-close').addEventListener('click', () => $('connect').close());
+$('connect-back').addEventListener('click', () => {
+  if (connect.existing) $('connect').close();
+  else showConnectChoose();
+});
+$('connect-open').addEventListener('click', () => attempt(() => openConnect()));
+
+$('connect-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  $('connect-error').textContent = '';
+  submitConnect().catch((err) => { $('connect-error').textContent = err.message; });
+});
+
+async function submitConnect() {
+  const t = connect.template;
+  const existing = connect.existing;
+  const base = existing || t.provider;
+  const isCli = base.kind === 'claude_code' || base.kind === 'codex';
+  if (isCli) {
+    if (!connect.cli || !connect.cli.found) throw new Error('The app was not found. Install it, or enter where it is under More options, then check again.');
+    if (!connect.cli.signedIn) throw new Error('Sign in to the app first (see above), then check again.');
+    if (base.kind === 'codex' && !$('cf-cli-ack').checked) throw new Error('Tick the box to confirm you understand how Codex is limited.');
+  }
+  const models = $('cf-models').value.split(/[\n,]/).map((m) => m.trim()).filter(Boolean);
+  const provider = {
+    id: existing ? existing.id : '',
+    name: $('cf-name').value.trim() || base.name || t.title,
+    kind: base.kind,
+    baseUrl: $('cf-url-label').classList.contains('hidden') ? base.baseUrl : $('cf-url').value.trim(),
+    models,
+    jurisdiction: $('cf-juris').value.trim() || base.jurisdiction,
+    trust: t.group === 'custom' ? $('cf-trust').value : base.trust,
+    effort: base.kind === 'anthropic' ? ($('cf-effort').value || null) : null,
+    maxTokens: Number($('cf-max').value) || base.maxTokens || 8192,
+    command: isCli ? ($('cf-path').value.trim() || null) : null,
+  };
+  const key = $('cf-key').value.trim();
+  if (!existing && base.kind === 'anthropic' && !key) throw new Error('Paste your API key.');
+  if (!existing && t.group === 'api' && !key) throw new Error('Paste your API key.');
+  $('connect-submit').disabled = true;
+  try {
+    const before = new Set(state.settings.providers.map((p) => p.id));
+    state.settings = await call('save_provider', { provider });
+    const saved = existing ? state.settings.providers.find((p) => p.id === existing.id) : state.settings.providers.find((p) => !before.has(p.id));
+    if (key) state.settings = await call('set_api_key', { providerId: saved.id, key });
+    $('cf-key').value = '';
+    let note = '';
+    if (!isCli && (!models.length || !existing)) {
+      try {
+        state.settings = await call('fetch_models', { providerId: saved.id });
+      } catch (err) {
+        const p = state.settings.providers.find((x) => x.id === saved.id);
+        if (!p.models.length) note = ` It is saved, but its models could not be listed (${err.message}). Is it running? Add model names under More options.`;
+      }
+    }
+    renderProviders();
+    fillProviderSelect(saved.id);
+    $('connect').close();
+    toast(`${saved.name} ${existing ? 'saved' : 'connected'}.${note}`, !!note);
+  } finally {
+    $('connect-submit').disabled = false;
+  }
 }
 
 function mb(bytes) {
@@ -825,13 +975,6 @@ $('model-remove').addEventListener('click', () => attempt(async () => {
 listen('model-progress', (ev) => {
   const p = ev.payload;
   $('model-progress').textContent = `Downloading ${p.stage}: ${mb(p.done)} of ${mb(p.total)}`;
-});
-
-$('add-provider').addEventListener('click', () => {
-  $('provider-cards').append(providerCard({
-    id: '', name: '', kind: 'openai_compatible', baseUrl: '', models: [], jurisdiction: '', trust: 'offshore',
-    effort: null, maxTokens: 8192, hasKey: false, effectiveTrust: 'offshore',
-  }));
 });
 
 $('save-policy').addEventListener('click', () => attempt(async () => {

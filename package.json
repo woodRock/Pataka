@@ -1,7 +1,7 @@
 {
   "name": "pataka",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Pātaka desktop app (Tauri). The UI is plain HTML/CSS/JS in ui/ with no npm runtime dependencies; npm is only used for the Tauri CLI.",
   "license": "Apache-2.0",
   "scripts": {

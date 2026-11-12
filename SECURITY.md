@@ -40,6 +40,16 @@ Files are written atomically (temporary file, then rename) with owner-only permi
 - Detected spans are cached in memory by text hash to avoid re-running the model over the history. The cache is dropped on lock.
 - On macOS, loading a library that was not signed with Pātaka needs the `com.apple.security.cs.disable-library-validation` entitlement (`src-tauri/Entitlements.plist`). The hash check before loading stands in for Apple's library validation.
 
+### Subscriptions through Claude Code and Codex
+
+Pātaka can use a Claude or ChatGPT subscription by running the vendor's own signed-in command-line app (`claude` or `codex`), the way T3 Code does. Pātaka never handles that login; the app keeps its own credentials. Each message starts a fresh run:
+
+- Only Tūmataiti-redacted text is sent, and the whole kōrero is redacted again first, exactly as for the APIs. These connections always count as offshore, so tapu kōrero cannot use them.
+- The prompt goes in on standard input, not the command line, where other users of the computer could see it. Each run happens in a new, empty temporary folder that is deleted afterwards.
+- **Claude Code** runs with `--tools ""` (no tools at all), `--strict-mcp-config` (no MCP servers), `--setting-sources ""` (no user or project settings, hooks or CLAUDE.md files), `--disable-slash-commands` and `--no-session-persistence`, with Pātaka's system prompt replacing Claude Code's. If its start-up event lists any tool, or it starts a tool call, Pātaka stops it.
+- **Codex** has no way to switch its command tool off. It runs with `--sandbox read-only`, `--ephemeral`, `--ignore-rules`, no inherited environment for commands, and browser, computer use and apps disabled. Pātaka watches its event stream and kills it the moment it starts a command, file change, web search or tool call. That is best effort: in the moment before it is stopped, a command could read a file. The connect dialog says so and asks for confirmation.
+- Whether a vendor allows its subscription to be used through another app is set by its terms. Check them.
+
 ### The window (Tauri)
 
 - The Tauri capability for the window grants only `core:event:allow-listen` and `allow-unlisten`. No file system, shell, HTTP, opener or clipboard plugins are exposed to JavaScript. The save dialog for exports is opened from Rust.
@@ -59,6 +69,7 @@ Files are written atomically (temporary file, then rename) with owner-only permi
 | Threat | Mitigation |
 |---|---|
 | A cloud provider logs or retains prompts | Only Tūmataiti-redacted text leaves the device. Tapu kōrero only go to on-device or sovereign providers. |
+| A subscription app (coding agent) acts on the computer | Claude Code runs with no tools; Codex runs read-only and is stopped as soon as it starts an action |
 | Missed personal data (false negatives) | Checksum-validated rules, the Tūmataiti name model, kaitiaki lists, a review step that shows the full outbound text, and fail-closed blocking for secrets and tapu terms |
 | Tampered model or runtime files | Pinned SHA-256 for every file, checked at download and at every load |
 | An earlier on-device conversation is later sent to the cloud | The whole history is redacted again whenever the destination is off the device |

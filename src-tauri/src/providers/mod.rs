@@ -2,6 +2,7 @@
 //! and only after redaction and the sovereignty check have passed.
 
 pub mod anthropic;
+pub mod cli;
 pub mod openai;
 mod sse;
 
@@ -44,105 +45,224 @@ pub fn http_client() -> reqwest::Client {
         .expect("HTTP client builds")
 }
 
-pub fn presets() -> Vec<Provider> {
-    let p = |id: &str,
-             name: &str,
-             kind,
-             url: &str,
-             models: &[&str],
-             jurisdiction: &str,
-             trust,
-             effort: Option<&str>,
-             max_tokens| Provider {
-        id: id.into(),
-        name: name.into(),
-        kind,
-        base_url: url.into(),
-        models: models.iter().map(|m| m.to_string()).collect(),
-        jurisdiction: jurisdiction.into(),
-        trust,
-        effort: effort.map(Into::into),
-        max_tokens,
-    };
+/// What the "Connect a model" dialog offers. Each becomes a provider when connected.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Template {
+    pub id: &'static str,
+    /// "device", "subscription", "api" or "custom": how the dialog groups and asks for it.
+    pub group: &'static str,
+    pub title: &'static str,
+    pub blurb: &'static str,
+    pub provider: Provider,
+    /// Where to get an API key, if one is needed.
+    pub key_url: Option<&'static str>,
+}
+
+pub fn templates() -> Vec<Template> {
     use ProviderKind::*;
     use Trust::*;
+    let p =
+        |name: &str, kind, url: &str, models: &[&str], jurisdiction: &str, trust, effort: Option<&str>, max_tokens| {
+            Provider {
+                id: String::new(),
+                name: name.into(),
+                kind,
+                base_url: url.into(),
+                models: models.iter().map(|m| m.to_string()).collect(),
+                jurisdiction: jurisdiction.into(),
+                trust,
+                effort: effort.map(Into::into),
+                max_tokens,
+                command: None,
+            }
+        };
+    let t = |id, group, title, blurb, provider, key_url| Template {
+        id,
+        group,
+        title,
+        blurb,
+        provider,
+        key_url,
+    };
     vec![
-        p(
+        t(
             "ollama",
-            "Ollama (on this device)",
-            OpenaiCompatible,
-            "http://localhost:11434/v1",
-            &[],
-            "This device",
-            Device,
+            "device",
+            "Ollama",
+            "Models running on this computer. Nothing leaves it.",
+            p(
+                "Ollama (on this device)",
+                OpenaiCompatible,
+                "http://localhost:11434/v1",
+                &[],
+                "This device",
+                Device,
+                None,
+                8192,
+            ),
             None,
-            8192,
         ),
-        p(
+        t(
             "lmstudio",
-            "LM Studio (on this device)",
-            OpenaiCompatible,
-            "http://localhost:1234/v1",
-            &[],
-            "This device",
-            Device,
+            "device",
+            "LM Studio",
+            "Models running on this computer. Nothing leaves it.",
+            p(
+                "LM Studio (on this device)",
+                OpenaiCompatible,
+                "http://localhost:1234/v1",
+                &[],
+                "This device",
+                Device,
+                None,
+                8192,
+            ),
             None,
-            8192,
         ),
-        p(
+        t(
+            "claude-code",
+            "subscription",
+            "Claude subscription",
+            "Your Claude Pro or Max plan, through the Claude Code app you are signed in to.",
+            p(
+                "Claude (subscription)",
+                ClaudeCode,
+                "https://api.anthropic.com",
+                &["default", "opus", "sonnet", "haiku"],
+                "United States",
+                Offshore,
+                None,
+                64000,
+            ),
+            None,
+        ),
+        t(
+            "codex",
+            "subscription",
+            "ChatGPT subscription",
+            "Your ChatGPT plan, through the Codex app you are signed in to.",
+            p(
+                "ChatGPT (subscription)",
+                Codex,
+                "https://chatgpt.com",
+                &["default"],
+                "United States",
+                Offshore,
+                None,
+                16000,
+            ),
+            None,
+        ),
+        t(
             "anthropic",
-            "Anthropic",
-            Anthropic,
-            "https://api.anthropic.com",
-            &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
-            "United States",
-            Offshore,
-            Some("medium"),
-            64000,
+            "api",
+            "Anthropic API",
+            "Claude models, billed to an Anthropic API key.",
+            p(
+                "Anthropic",
+                Anthropic,
+                "https://api.anthropic.com",
+                &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+                "United States",
+                Offshore,
+                Some("medium"),
+                64000,
+            ),
+            Some("https://platform.claude.com/settings/keys"),
         ),
-        p(
+        t(
             "openai",
-            "OpenAI",
-            OpenaiCompatible,
-            "https://api.openai.com/v1",
-            &[],
-            "United States",
-            Offshore,
-            None,
-            16000,
+            "api",
+            "OpenAI API",
+            "GPT models, billed to an OpenAI API key.",
+            p(
+                "OpenAI",
+                OpenaiCompatible,
+                "https://api.openai.com/v1",
+                &[],
+                "United States",
+                Offshore,
+                None,
+                16000,
+            ),
+            Some("https://platform.openai.com/api-keys"),
         ),
-        p(
+        t(
             "deepseek",
+            "api",
             "DeepSeek",
-            OpenaiCompatible,
-            "https://api.deepseek.com/v1",
-            &["deepseek-chat", "deepseek-reasoner"],
-            "China",
-            Offshore,
-            None,
-            8000,
+            "DeepSeek models. Data is processed in China.",
+            p(
+                "DeepSeek",
+                OpenaiCompatible,
+                "https://api.deepseek.com/v1",
+                &["deepseek-chat", "deepseek-reasoner"],
+                "China",
+                Offshore,
+                None,
+                8000,
+            ),
+            Some("https://platform.deepseek.com/api_keys"),
         ),
-        p(
+        t(
             "qwen",
+            "api",
             "Qwen (Alibaba Cloud)",
-            OpenaiCompatible,
-            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-            &["qwen-plus", "qwen-max"],
-            "Singapore / China",
-            Offshore,
-            None,
-            8000,
+            "Qwen models from Alibaba Cloud.",
+            p(
+                "Qwen (Alibaba Cloud)",
+                OpenaiCompatible,
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                &["qwen-plus", "qwen-max"],
+                "Singapore / China",
+                Offshore,
+                None,
+                8000,
+            ),
+            Some("https://modelstudio.console.alibabacloud.com/"),
         ),
-        p(
+        t(
             "mistral",
+            "api",
             "Mistral",
-            OpenaiCompatible,
-            "https://api.mistral.ai/v1",
-            &["mistral-large-latest"],
-            "France (EU)",
-            Offshore,
+            "Mistral models. Data is processed in the EU.",
+            p(
+                "Mistral",
+                OpenaiCompatible,
+                "https://api.mistral.ai/v1",
+                &["mistral-large-latest"],
+                "France (EU)",
+                Offshore,
+                None,
+                16000,
+            ),
+            Some("https://console.mistral.ai/api-keys"),
+        ),
+        t(
+            "openrouter",
+            "api",
+            "OpenRouter",
+            "Many providers behind one key. Where data goes depends on the model.",
+            p(
+                "OpenRouter",
+                OpenaiCompatible,
+                "https://openrouter.ai/api/v1",
+                &[],
+                "Varies by model",
+                Offshore,
+                None,
+                16000,
+            ),
+            Some("https://openrouter.ai/keys"),
+        ),
+        t(
+            "custom",
+            "custom",
+            "Other server",
+            "Any OpenAI-compatible server: a local one, or one you or your community run.",
+            p("", OpenaiCompatible, "", &[], "", Offshore, None, 8192),
             None,
-            16000,
         ),
     ]
 }
@@ -163,16 +283,35 @@ pub async fn stream_chat(
         ProviderKind::OpenaiCompatible => {
             openai::stream(client, provider, api_key, model, system, messages, on_event).await
         }
+        ProviderKind::ClaudeCode | ProviderKind::Codex => {
+            cli::stream(
+                provider.kind,
+                provider.command.as_deref(),
+                model,
+                system,
+                messages,
+                on_event,
+            )
+            .await
+        }
     }
 }
 
 pub async fn list_models(client: &reqwest::Client, provider: &Provider, api_key: Option<&str>) -> Result<Vec<String>> {
+    if provider.kind.is_cli() {
+        // The apps take model aliases; offer the template's list.
+        return Ok(templates()
+            .into_iter()
+            .find(|t| t.provider.kind == provider.kind)
+            .map(|t| t.provider.models)
+            .unwrap_or_default());
+    }
     let base = provider.base_url.trim_end_matches('/');
     let req = match provider.kind {
         ProviderKind::Anthropic => {
             anthropic::headers(client.get(format!("{base}/v1/models?limit=100")), api_key, false)
         }
-        ProviderKind::OpenaiCompatible => openai::headers(client.get(format!("{base}/models")), api_key),
+        _ => openai::headers(client.get(format!("{base}/models")), api_key),
     };
     let resp = req.send().await?;
     let resp = check_status(resp).await?;
