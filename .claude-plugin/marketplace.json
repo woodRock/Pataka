@@ -1,0 +1,11 @@
+{
+  "name": "pataka",
+  "owner": { "name": "Jesse Wood" },
+  "plugins": [
+    {
+      "name": "tumataiti",
+      "source": "./mods/tumataiti",
+      "description": "Tūmataiti redaction for Claude Code: names and personal details become placeholders before anything is stored or sent."
+    }
+  ]
+}
