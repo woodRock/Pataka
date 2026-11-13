@@ -22,15 +22,9 @@ pub struct Name {
 }
 
 fn fold(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'ā' | 'Ā' => 'a',
-            'ē' | 'Ē' => 'e',
-            'ī' | 'Ī' => 'i',
-            'ō' | 'Ō' => 'o',
-            'ū' | 'Ū' => 'u',
-            c => c,
-        })
+    use unicode_normalization::UnicodeNormalization;
+    s.nfd()
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
         .flat_map(char::to_lowercase)
         .collect()
 }
@@ -94,7 +88,12 @@ pub fn parse(written: &str) -> Option<Name> {
 /// given names that agree as far as both go (`l` agrees with `latanya`). A
 /// form with no given names agrees with any.
 pub fn compatible(a: &Name, b: &Name) -> bool {
-    if a.family != b.family {
+    // `de Montjoye` and `Montjoye` are one family name, however the model
+    // cut the span.
+    let core = |f: &str| -> String {
+        f.split(' ').skip_while(|w| PARTICLES.contains(w)).collect::<Vec<_>>().join(" ")
+    };
+    if a.family != b.family && core(&a.family) != core(&b.family) {
         return false;
     }
     a.given.iter().zip(&b.given).all(|(x, y)| {
@@ -212,7 +211,10 @@ pub fn is_public(written: &str, public: &[String]) -> bool {
 
 /// A surname as papers write it: capitalised, perhaps with a particle
 /// (`de Montjoye`), a hyphen or an apostrophe.
-const SURNAME: &str = r"(?:(?:de|van|von|der|di|da|du|le)\s)?\p{Lu}[\p{L}'’-]+";
+const SURNAME: &str = r"(?:(?:de|van|von|der|di|da|du|le)\s)?\p{Lu}[\p{L}\p{M}'’-]+";
+/// An author inside a parenthetical citation: a surname, or an
+/// organisation of up to four capitalised words (`Te Mana Raraunga`).
+const AUTHOR: &str = r"(?:(?:de|van|von|der|di|da|du|le)\s)?\p{Lu}[\p{L}\p{M}'’-]*(?:\s\p{Lu}[\p{L}\p{M}'’-]*){0,3}";
 /// A year in a citation: 1600 to 2099, perhaps with a letter (`2019a`).
 const YEAR: &str = r"(?:1[6-9]|20)\d{2}[a-z]?";
 
@@ -225,7 +227,7 @@ const NOT_SURNAMES: [&str; 24] = [
 static PAREN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(([^()]{4,400})\)").expect("pattern compiles"));
 static PAREN_PART: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"^\s*(?:(?:see|e\.g\.|cf\.|i\.e\.)[,\s]+)*((?:{SURNAME})(?:(?:,\s*|\s+(?:and|&)\s+)(?:{SURNAME}))*(?:,?\s+et\s+al\.?)?),?\s+{YEAR}(?:,\s*(?:p|pp|ch)\.?\s*[\d–-]+)?\s*$"
+        r"^\s*(?:(?:see|e\.g\.|cf\.|i\.e\.)[,\s]+)*((?:{AUTHOR})(?:(?:,\s*|\s+(?:and|&)\s+)(?:{AUTHOR}))*(?:,?\s+et\s+al\.?)?),?\s+{YEAR}(?:,\s*(?:p|pp|ch)\.?\s*[\d–-]+)?\s*$"
     ))
     .expect("pattern compiles")
 });
@@ -236,9 +238,15 @@ static NARRATIVE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("pattern compiles")
 });
 static REFERENCES_HEADING: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?mi)^\s*(?:\d+\.?\s*|[ivx]+\.\s*)?(?:references|bibliography|works cited|literature cited|reference list|ngā tohutoro)\s*$")
+    Regex::new(r"(?mi)^[ \t]*(?:\d+(?:\t|→)[ \t]*)?(?:\d+\.?[ \t]*|[ivx]+\.[ \t]*)?(?:references|bibliography|works cited|literature cited|reference list|ngā tohutoro)[ \t]*$")
         .expect("pattern compiles")
 });
+
+/// Where a reference list starts (just after its heading), if `text` has one.
+pub fn references_start(text: &str) -> Option<usize> {
+    REFERENCES_HEADING.find_iter(text).last().map(|m| m.end())
+}
+static LINE_NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^[ \t]*\d{1,5}(?:\t|→|[ \t]{2,}|[ \t](\p{Lu}))").expect("pattern compiles"));
 static ABSTRACT_HEADING: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?mi)^\s*(?:abstract|summary|tuhinga whakarāpopoto)\b[.:—-]?").expect("pattern compiles")
 });
@@ -305,8 +313,11 @@ pub fn cited_names(text: &str) -> Vec<String> {
     for c in NARRATIVE.captures_iter(text) {
         split_surnames(&c[1]).into_iter().for_each(&mut push);
     }
-    if let Some(h) = REFERENCES_HEADING.find_iter(text).last() {
-        let refs = &text[h.end()..];
+    if let Some(at) = references_start(text) {
+        // Line numbers at the start of a line (pdftotext -layout, a Read)
+        // are not part of an entry.
+        let refs = LINE_NUMBER.replace_all(&text[at..], "$1").into_owned();
+        let refs = refs.as_str();
         let joined = refs.replace('\n', " ");
         for c in SURNAME_INITIALS.captures_iter(&joined) {
             push(format!("{}, {}", &c[1], c[2].trim()));

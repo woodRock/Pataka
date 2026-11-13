@@ -766,6 +766,9 @@ async fn check(
         )));
     }
     let k = &settings.kaupapa;
+    // Escaped first, so the model's spans fall on the text that is redacted.
+    let escaped = redaction::escape_literals(text);
+    let text: &str = &escaped;
     let model_spans = if k.use_model && student::is_installed(state.store.root()) {
         let app = app.clone();
         let t = text.to_string();

@@ -292,7 +292,8 @@ fn build_outbound(
         match m.role {
             Role::User => {
                 let content = if redact {
-                    let r = redaction::redact(&m.text, k, &conv.terms, &conv.allow, model.get(&m.text)?, &mut vault);
+                    let text = redaction::escape_literals(&m.text);
+                    let r = redaction::redact(&text, k, &conv.terms, &conv.allow, model.get(&text)?, &mut vault);
                     history_findings += r.findings.len();
                     history_blocked |= r.blocked;
                     r.output
@@ -319,7 +320,10 @@ fn build_outbound(
     }
 
     let new = if redact {
-        redaction::redact(text, k, &conv.terms, &conv.allow, model.get(text)?, &mut vault)
+        {
+            let text = redaction::escape_literals(text);
+            redaction::redact(&text, k, &conv.terms, &conv.allow, model.get(&text)?, &mut vault)
+        }
     } else {
         redaction::Outcome {
             output: text.to_string(),
@@ -385,8 +389,16 @@ async fn model_spans_for(
     if !redact || !k.use_model || !student::is_installed(&root) {
         return Ok(ModelSpans::default());
     }
-    let mut texts: Vec<String> = conv.messages.iter().map(|m| m.text.clone()).collect();
-    texts.push(text.to_string());
+    // Each text as it may be redacted: as written (the model's replies) and,
+    // where it differs, with placeholder-like text escaped (the person's).
+    let mut texts: Vec<String> = Vec::new();
+    for t in conv.messages.iter().map(|m| m.text.as_str()).chain([text]) {
+        texts.push(t.to_string());
+        let escaped = redaction::escape_literals(t);
+        if escaped != t {
+            texts.push(escaped.into_owned());
+        }
+    }
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<AppState>();

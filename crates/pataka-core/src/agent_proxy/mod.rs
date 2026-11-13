@@ -544,6 +544,7 @@ pub fn redact_texts_as(
         stats: redact::Stats::default(),
         tapu: false,
         use_model: true,
+        escape: true,
     };
     let out: Vec<String> = texts.iter().map(|t| r.text(t)).collect();
     let (stats, tapu) = (r.stats, r.tapu);
@@ -573,6 +574,8 @@ pub fn redact_texts_as(
 pub fn check_prompt(host: &dyn Host, korero: &str, prompt: &str) -> Result<Vec<String>> {
     let (kaupapa, terms, allow) = host.context(korero)?;
     let model = if kaupapa.use_model { host.model()? } else { None };
+    // Escaped first, so the model's spans fall on the text that is redacted.
+    let prompt = &*crate::redaction::escape_literals(prompt);
     let spans = model.as_ref().and_then(|m| m.detect(prompt).ok()).unwrap_or_default();
     let mut vault = Vault::default();
     let out = crate::redaction::redact(prompt, &kaupapa, &terms, &allow, &spans, &mut vault);
@@ -623,6 +626,7 @@ pub fn redact_request(host: &dyn Host, session: &Session, body: &mut Value) -> R
         stats: redact::Stats::default(),
         tapu: false,
         use_model: true,
+        escape: true,
     };
     r.request(body);
     if r.tapu {

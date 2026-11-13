@@ -56,3 +56,13 @@ test('the model is told about placeholders and pataka run', async ($, on) => {
   expect(note?.text.includes('pataka run --')).toBe(true)
   expect(note?.text.includes('share a number')).toBe(true)
 })
+
+test('an escaped literal in a command is sent back to be unescaped', async ($, on) => {
+  const calls: string[] = []
+  const seen: string[] = []
+  fakeService(on, calls)
+  bashSeen(on, seen)
+  const literal = `[literal ${PERSON.slice(1)}`
+  await $.tool.call({ tool: 'Bash', command: `echo ${literal}` })
+  expect(calls.length).toBe(1)
+})

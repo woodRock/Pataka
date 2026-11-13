@@ -145,6 +145,9 @@ pub struct Redactor<'a> {
     pub tapu: bool,
     /// Run the name model on this text (off for the agent's own system prompt).
     pub use_model: bool,
+    /// Escape text that looks like a placeholder (`redaction::escape_literals`):
+    /// on for everything but the model's own messages.
+    pub escape: bool,
 }
 
 /// Names the agent's own instructions are full of, which a name model would
@@ -220,12 +223,14 @@ impl Redactor<'_> {
             return s.to_string();
         }
         self.stats.texts += 1;
+        let escaped = if self.escape { redaction::escape_literals(s) } else { std::borrow::Cow::Borrowed(s) };
+        let s: &str = &escaped;
         // The name model reads prose. In code and paths it mistakes segments
         // for names and URLs, which would break paths the agent needs, so its
         // spans there (and spans with no letters or digits, like `---`) are
         // ignored. Rules, kaitiaki lists and identity terms still apply.
         let spans: Vec<Span> = if self.use_model {
-            (self.model)(s)
+            (self.model)(&redaction::detection_view(s))
                 .into_iter()
                 .filter(|sp| sp.text.chars().any(char::is_alphanumeric) && !in_code_token(s, sp.start, sp.end))
                 .collect()
@@ -334,9 +339,13 @@ impl Redactor<'_> {
         }
         if let Some(Value::Array(messages)) = body.get_mut("messages") {
             for m in messages.iter_mut() {
+                // The model's own messages hold real placeholders; everything
+                // else is the person's text or their files'.
+                let escape = std::mem::replace(&mut self.escape, m["role"] != "assistant");
                 if let Some(c) = m.get_mut("content") {
                     self.content(c);
                 }
+                self.escape = escape;
             }
         }
         // `tools` (definitions) and `metadata` carry no conversation text and
@@ -402,7 +411,7 @@ pub(crate) fn document_text(b: &Value) -> std::result::Result<Option<String>, St
 
 /// Tells the model how to work with placeholders, so it uses them instead of
 /// refusing or guessing.
-pub const PLACEHOLDER_NOTE: &str = "Privacy note from Pātaka: text in square brackets such as [PERSON_1], [EMAIL_2] or [ADDRESS_1] is a placeholder for private information that never leaves the user's computer. Pātaka puts the real value back on the user's computer, including in your tool calls (file paths, file contents, commands), before they run. Treat each placeholder as the real value: use it exactly as written wherever the value is needed, for example write [PERSON_1] into a file to write that person's name. Do not say the information is redacted or missing, and never guess what a placeholder stands for. A placeholder covers the whole value, so parts of it (such as a first name) are not available separately. Placeholders that share a number, such as [PERSON_3] and [PERSON_3B], are different written forms of one name (a full name and a surname alone, say), so they very likely refer to the same person. If a shell command that needs real values is refused because a hook changed its input, run it as `pataka run -- <command> [arguments]`: Pātaka puts the real values into its arguments only as it runs, and passes them to the program directly, not through a shell.";
+pub const PLACEHOLDER_NOTE: &str = "Privacy note from Pātaka: text in square brackets such as [PERSON_1], [EMAIL_2] or [ADDRESS_1] is a placeholder for private information that never leaves the user's computer. Pātaka puts the real value back on the user's computer, including in your tool calls (file paths, file contents, commands), before they run. Treat each placeholder as the real value: use it exactly as written wherever the value is needed, for example write [PERSON_1] into a file to write that person's name. Do not say the information is redacted or missing, and never guess what a placeholder stands for. A placeholder covers the whole value, so parts of it (such as a first name) are not available separately. Placeholders that share a number, such as [PERSON_3] and [PERSON_3B], are different written forms of one name (a full name and a surname alone, say), so they very likely refer to the same person. If a shell command that needs real values is refused because a hook changed its input, run it as `pataka run -- <command> [arguments]`: Pātaka puts the real values into its arguments only as it runs, and passes them to the program directly, not through a shell. Text such as [literal PERSON_1] is not a placeholder: it is text that already looked like one (in a paper about redaction, say), and it means exactly the bracketed text without the word literal. Copy it as it is; Pātaka turns it back into what was written.";
 
 fn add_note(system: &mut Value) {
     match system {
@@ -592,6 +601,7 @@ mod tests {
             stats: Stats::default(),
             tapu: false,
             use_model: true,
+            escape: true,
         }
     }
 

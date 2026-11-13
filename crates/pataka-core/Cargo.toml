@@ -24,6 +24,7 @@ argon2 = { version = "0.5", features = ["std", "zeroize"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 regex = "1"
+unicode-normalization = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 thiserror = "2"
