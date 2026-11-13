@@ -465,6 +465,37 @@ fn model_misfire(text: &str, s: &Span) -> bool {
         // "te iwi", "ngā hapū": a kind of group, not one. (A kinship word the
         // model takes for a person is flagged by Tūmataiti's review instead.)
         || (s.category == Category::Affiliation && only_collective_words(&s.text))
+        // Chart labels and tables: an "IP address" that is not shaped like
+        // one, or an "ID" that runs across lines or is a plain decimal.
+        || (s.category == Category::IpAddress && !looks_like_ip(&s.text))
+        // (A model NZ ID becomes an "ID" only after its check digits fail,
+        // later, so it is judged here the same way.)
+        || (matches!(s.category, Category::OtherId | Category::NzGovId)
+            && (s.text.contains('\n') || plain_decimal(s.text.trim())))
+}
+
+/// An IPv4 address (four numbers of 0 to 255 joined by dots) or an IPv6 one
+/// (hex groups joined by colons).
+fn looks_like_ip(s: &str) -> bool {
+    let s = s.trim();
+    let v4 = s.split('.').count() == 4
+        && s.split('.')
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u16>().is_ok_and(|n| n <= 255));
+    let v6 = s.contains(':') && s.split(':').count() >= 3 && s.chars().all(|c| c.is_ascii_hexdigit() || c == ':');
+    v4 || v6
+}
+
+/// `21.83`, `0.4`, `95%`: a measurement, not an identifier.
+fn plain_decimal(s: &str) -> bool {
+    let s = s.trim_end_matches('%');
+    let mut parts = s.split('.');
+    let whole = parts.next().unwrap_or("");
+    let frac = parts.next();
+    parts.next().is_none()
+        && !whole.is_empty()
+        && whole.len() <= 6
+        && whole.chars().all(|c| c.is_ascii_digit())
+        && frac.is_some_and(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Clean the name model's spans before they are trusted: drop fragments that
@@ -684,8 +715,16 @@ fn known_terms(vault: &Vault) -> Vec<Term> {
             let category = Category::ALL.into_iter().find(|c| c.label() == label)?;
             let term = vault.placeholders.get(placeholder)?.clone();
             // An older model's misfires (a hex id, a citation key, a model
-            // name taken for an email) are not caught again either.
-            let misfire = record_key(term.trim()) || (category == Category::Email && !looks_like_email(&term));
+            // name taken for an email) are not caught again either. Nor are
+            // kinship or group words alone (koro, te iwi), which name no one,
+            // or a bare number the model took for an ID or IP address (a line
+            // number, a chart label): the rules find real ones afresh, and
+            // out of context a number is not worth hiding everywhere.
+            let misfire = record_key(term.trim())
+                || (category == Category::Email && !looks_like_email(&term))
+                || (matches!(category, Category::Person | Category::Affiliation) && only_collective_words(&term))
+                || (matches!(category, Category::OtherId | Category::IpAddress)
+                    && !term.chars().any(char::is_alphabetic));
             (substantial(category, &term) && alnum_count(&term) >= 3 && !misfire).then_some(Term { term, category })
         })
         .collect()
@@ -1817,5 +1856,93 @@ mod paper_reading_tests {
         let out = run(text, &model, &k, &mut Vault::default());
         let body = out.split("References").next().unwrap_or_default();
         assert!(!body.contains("Kereama") && !body.contains("Raraunga") && !body.contains("Montjoye"));
+    }
+}
+
+#[cfg(test)]
+mod remembered_misfire_tests {
+    use super::*;
+
+    /// Remember `value` under `category`, as an older read would have.
+    fn remember(v: &mut Vault, category: Category, value: &str, n: usize) -> String {
+        let p = format!("[{}_{n}]", category.label());
+        v.placeholders.insert(p.clone(), value.into());
+        v.entities.insert(entity_key(category, value), p.clone());
+        p
+    }
+
+    #[test]
+    fn remembered_kinship_words_and_bare_numbers_are_not_caught_again() {
+        let mut v = Vault::default();
+        let koro = remember(&mut v, Category::Affiliation, "Koro", 1);
+        remember(&mut v, Category::Affiliation, "te iwi", 2);
+        let id = remember(&mut v, Category::OtherId, "21.83", 1);
+        remember(&mut v, Category::IpAddress, "12.4.2", 1);
+        let text = "Koro and te iwi scored 21.83 on 12.4.2.";
+        let out = redact(text, &Kaupapa::default(), &[], &[], &[], &mut v).output;
+        assert_eq!(out, text);
+        // Their placeholders, already in a conversation, still restore.
+        assert_eq!(restore(&format!("{koro} {id}"), &v), "Koro 21.83");
+    }
+
+    #[test]
+    fn a_name_with_a_kinship_word_and_the_persons_own_list_still_hide() {
+        let mut v = Vault::default();
+        remember(&mut v, Category::Person, "Koro Wetere", 1);
+        let out = redact("Koro Wetere spoke.", &Kaupapa::default(), &[], &[], &[], &mut v).output;
+        assert!(!out.contains("Wetere"), "{out}");
+        let terms = [Term {
+            term: "Koro".into(),
+            category: Category::Person,
+        }];
+        let out = redact(
+            "Koro spoke.",
+            &Kaupapa::default(),
+            &terms,
+            &[],
+            &[],
+            &mut Vault::default(),
+        )
+        .output;
+        assert!(!out.starts_with("Koro"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod chart_label_tests {
+    use super::*;
+
+    fn model(text: &str, needle: &str, category: Category) -> Span {
+        let start = text.find(needle).unwrap();
+        Span {
+            start,
+            end: start + needle.len(),
+            text: needle.into(),
+            category,
+            confidence: 0.95,
+            source: Source::Model,
+            detector: "test-model".into(),
+            checksum: Checksum::None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn chart_numbers_are_not_ip_addresses_or_ids() {
+        let text = "Leakage (%)\n12.3\n45.6\n78.9\n\n21.83\nserver 10.0.0.12 and passport X1234567";
+        let spans = [
+            model(text, "12.3\n45.6\n78.9", Category::IpAddress),
+            model(text, "21.83", Category::OtherId),
+            model(text, "45.6\n78.9", Category::OtherId),
+            model(text, "78.9\n\n21", Category::NzGovId),
+            model(text, "10.0.0.12", Category::IpAddress),
+            model(text, "X1234567", Category::OtherId),
+        ];
+        let out = redact(text, &Kaupapa::default(), &[], &[], &spans, &mut Vault::default()).output;
+        assert!(out.starts_with("Leakage (%)\n12.3\n45.6\n78.9\n\n21.83\n"), "{out}");
+        assert!(
+            !out.contains("10.0.0.12") && !out.contains("X1234567"),
+            "real ones still hidden: {out}"
+        );
     }
 }

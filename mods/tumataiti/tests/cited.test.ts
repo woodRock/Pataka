@@ -15,6 +15,7 @@ type On = Parameters<Parameters<typeof test>[1]>[1]
 function fakeService(on: On) {
   const calls: string[] = []
   let shown = false
+  let answered = false
   on('env.get', () => ({ value: '/home/t' }))
   on('fs.exists', () => ({ value: true }))
   on('fs.read', () => ({ value: JSON.stringify({ port: 1, token: 't' }) }))
@@ -25,13 +26,19 @@ function fakeService(on: On) {
     calls.push(action === 'cited-authors' ? `${action}:${body.show}` : action)
     if (action === 'cited-authors') {
       shown = body.show === true
+      answered = true
       return { value: { ok: true, status: 200, text: JSON.stringify({ show: shown }) } }
     }
     const texts = (body.texts ?? []).map(t => (shown ? t : t.split('Sweeney').join(PERSON)))
-    const cited = !shown && (body.texts ?? []).some(t => t.includes('Sweeney')) ? 1 : 0
+    const cited = !answered && (body.texts ?? []).some(t => t.includes('Sweeney')) ? 1 : 0
     return { value: { ok: true, status: 200, text: JSON.stringify({ texts, categories: {}, tapu: false, citedAuthors: cited }) } }
   })
-  return calls
+  // Stands for a service restart: the answer is forgotten.
+  const forget = () => {
+    answered = false
+    shown = false
+  }
+  return Object.assign(calls, { forget })
 }
 
 /** Answer Pātaka's question with `label`, or dismiss it (null). */
@@ -87,4 +94,16 @@ test('a dismissed question keeps them hidden and records nothing', async ($, on)
   await $.session.append(row('As shown (Sweeney, 2002).', 'u1') as never)
   expect(storedText(session, 0)).toBe(`As shown (${PERSON}, 2002).`)
   expect(calls).toEqual(['redact'])
+})
+
+test('after the service forgets the answer, it is asked again', async ($, on) => {
+  const calls = fakeService(on)
+  const asked = answer(on, 'Show them')
+  mock.session(on)
+  await $.session.append(row('As shown (Sweeney, 2002).', 'u1') as never)
+  // The service restarts: it no longer has the answer.
+  calls.forget()
+  await $.session.append(row('Sweeney again.', 'u2') as never)
+  expect(asked.length).toBe(2)
+  expect(calls.filter(c => c.startsWith('cited-authors')).length).toBe(2)
 })

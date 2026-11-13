@@ -117,8 +117,12 @@ type Redacted = { texts: string[]; categories: Record<string, number>; tapu: boo
 const SHOW = 'Show them'
 const HIDE = 'Keep hidden'
 const ALWAYS = 'Always show'
-/** Asked at most once per load; the service keeps the answer while it runs. */
-let citedAsked = false
+/**
+ * Dismissed once this load: not asked again until the mod reloads. An
+ * answer is kept by the service, which stops reporting cited authors as
+ * waiting, so after a service restart the question comes back by itself.
+ */
+let citedDismissed = false
 
 /** The pataka command: where the installer puts it, else on the PATH. */
 async function patakaCommand($: Dollar): Promise<string> {
@@ -134,8 +138,7 @@ async function patakaCommand($: Dollar): Promise<string> {
  * later session asks again.
  */
 async function askAboutCited($: Dollar, n: number): Promise<boolean> {
-  if (citedAsked) return false
-  citedAsked = true
+  if (citedDismissed) return false
   let answer: string
   try {
     answer = await $.ui.ask(
@@ -143,6 +146,7 @@ async function askAboutCited($: Dollar, n: number): Promise<boolean> {
       { header: 'Citations', options: [SHOW, HIDE, ALWAYS] },
     )
   } catch {
+    citedDismissed = true
     return false
   }
   const show = answer === SHOW || answer === ALWAYS
