@@ -309,6 +309,7 @@ impl Host for ServiceHost {
     fn lock(&self) -> Result<()> {
         *self.key.write().unwrap_or_else(|p| p.into_inner()) = None;
         *self.vault.lock().unwrap_or_else(|p| p.into_inner()) = Vault::default();
+        pataka_core::mail::ops::forget_attachments();
         let _ = audit::append(
             &self.store.audit_path(),
             audit::Entry {

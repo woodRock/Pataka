@@ -299,15 +299,39 @@ fn cut(s: &str, max: usize) -> (String, bool) {
     (s[..end].to_string(), true)
 }
 
-/// The attachments in an IMAP `BODYSTRUCTURE`: (name, decoded size). A leaf
-/// counts when it has a file name, or is not text (inline images and the
-/// like); plain and HTML bodies are skipped.
+/// One part of a message that counts as an attachment, from its
+/// `BODYSTRUCTURE`: where it is (`2`, `1.3`), what it is called and is, how
+/// it is encoded on the wire, and its decoded size.
+#[derive(Debug, Clone, PartialEq)]
+struct Leaf {
+    section: String,
+    name: String,
+    kind: String,
+    enc: String,
+    size: usize,
+}
+
+/// The attachments in an IMAP `BODYSTRUCTURE`: (name, decoded size).
 fn structure_attachments(t: &Tok, out: &mut Vec<(String, usize)>) {
+    let mut leaves = Vec::new();
+    structure_leaves(t, "", &mut leaves);
+    out.extend(leaves.into_iter().map(|l| (l.name, l.size)));
+}
+
+/// The attachments in an IMAP `BODYSTRUCTURE`. A leaf counts when it has a
+/// file name, or is not text (inline images and the like); plain and HTML
+/// bodies are skipped. `section` is the part number of `t` ("" at the top).
+fn structure_leaves(t: &Tok, section: &str, out: &mut Vec<Leaf>) {
     let l = t.list();
     // Multipart: the child parts come first, then the subtype.
     if matches!(l.first(), Some(Tok::List(_))) {
-        for c in l.iter().take_while(|x| matches!(x, Tok::List(_))) {
-            structure_attachments(c, out);
+        for (i, c) in l.iter().take_while(|x| matches!(x, Tok::List(_))).enumerate() {
+            let sub = if section.is_empty() {
+                format!("{}", i + 1)
+            } else {
+                format!("{section}.{}", i + 1)
+            };
+            structure_leaves(c, &sub, out);
         }
         return;
     }
@@ -315,7 +339,7 @@ fn structure_attachments(t: &Tok, out: &mut Vec<(String, usize)>) {
         return;
     }
     let lower = |i: usize| l[i].text().unwrap_or_default().to_ascii_lowercase();
-    let (ty, enc) = (lower(0), lower(5));
+    let (ty, sub, enc) = (lower(0), lower(1), lower(5));
     let param = |list: &Tok, key: &str| {
         list.list().chunks(2).find_map(|p| match p {
             [k, v] if k.text()?.eq_ignore_ascii_case(key) => v.text(),
@@ -336,14 +360,250 @@ fn structure_attachments(t: &Tok, out: &mut Vec<(String, usize)>) {
     }
     let octets: usize = l[6].text().and_then(|s| s.parse().ok()).unwrap_or(0);
     let size = if enc == "base64" { octets / 4 * 3 } else { octets };
-    let name = name.map(|n| decode_words(&n)).unwrap_or_else(|| "unnamed".into());
-    out.push((name, size));
+    out.push(Leaf {
+        // A message that is not multipart has its one body at section 1.
+        section: if section.is_empty() {
+            "1".into()
+        } else {
+            section.to_string()
+        },
+        name: name.map(|n| decode_words(&n)).unwrap_or_else(|| "unnamed".into()),
+        kind: if sub.is_empty() { ty } else { format!("{ty}/{sub}") },
+        enc,
+        size,
+    });
 }
 
-/// The text of the attachment called `name` (or, failing an exact match,
-/// the one whose name contains it) in a whole raw message, with a heading
-/// naming the message `id`. Only PDFs with a text layer.
-fn attachment_text(raw: &[u8], id: &str, name: &str, pages: Option<&str>) -> Result<String> {
+/// Which of `names` the user meant by `name`: an exact match (ignoring
+/// case), or failing that the one name that contains it.
+fn pick_attachment(names: &[String], name: &str) -> Result<usize> {
+    if let Some(i) = names.iter().position(|n| n.eq_ignore_ascii_case(name)) {
+        return Ok(i);
+    }
+    let close: Vec<usize> = (0..names.len())
+        .filter(|&i| names[i].to_lowercase().contains(&name.to_lowercase()))
+        .collect();
+    match close.as_slice() {
+        [i] => Ok(*i),
+        _ => Err(Error::Invalid(if names.is_empty() {
+            "That email has no attachments.".into()
+        } else {
+            format!(
+                "No attachment is called \"{name}\". This email has: {}.",
+                names.join(", ")
+            )
+        })),
+    }
+}
+
+/// Refuse anything that is not a PDF, saying what it is. `head` is the
+/// file's first bytes when they are known. Returns whether it is surely a
+/// PDF: a generic `application/octet-stream` part has to be looked at.
+fn check_pdf(name: &str, kind: &str, head: Option<&[u8]>) -> Result<bool> {
+    if kind == "application/pdf"
+        || name.to_lowercase().ends_with(".pdf")
+        || head.is_some_and(|b| b.starts_with(b"%PDF-"))
+    {
+        return Ok(true);
+    }
+    if head.is_none() && (kind == "application/octet-stream" || kind.is_empty()) {
+        return Ok(false);
+    }
+    let what = if kind.starts_with("image/") {
+        "an image. Pātaka does not read images yet".to_string()
+    } else {
+        format!(
+            "a {} file. Pātaka reads the text of PDF attachments so far",
+            if kind.is_empty() { "kind of" } else { kind }
+        )
+    };
+    Err(Error::Invalid(format!(
+        "{name} is {what}, so nothing from it was sent."
+    )))
+}
+
+/// The text of an attachment, with a heading naming it and the message `id`.
+fn render_attachment(id: &str, pdf: &AttachmentPdf, pages: Option<&str>) -> Result<String> {
+    let range = crate::pdf::page_range(pages, pdf.text.pages.len())?;
+    Ok(format!(
+        "attachment: {} ({}, {} page(s)), from {id}\nOnly the text was read, on this computer; pictures in it were not.\n\n{}",
+        pdf.name,
+        size_text(pdf.bytes),
+        pdf.text.pages.len(),
+        pdf.text.render(range, ATTACHMENT_TEXT_LIMIT)
+    ))
+}
+
+/// A PDF attachment's name, size in bytes, and text.
+#[derive(Debug)]
+struct AttachmentPdf {
+    name: String,
+    bytes: usize,
+    text: crate::pdf::PdfText,
+}
+
+/// Read the PDF in `bytes`, an attachment called `name`.
+fn read_pdf(name: &str, bytes: &[u8]) -> Result<AttachmentPdf> {
+    let text = crate::pdf::extract(bytes).map_err(|e| Error::Invalid(format!("{name}: {e}")))?;
+    Ok(AttachmentPdf {
+        name: name.to_string(),
+        bytes: bytes.len(),
+        text,
+    })
+}
+
+/// Decode one part as fetched with `BODY.PEEK[section]`. `None` for an
+/// encoding Pātaka does not decode itself (the whole message is read then).
+fn decode_part(data: &[u8], enc: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    match enc {
+        "base64" => {
+            let clean: Vec<u8> = data.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
+            base64::engine::general_purpose::STANDARD
+                .decode(&clean)
+                .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&clean))
+                .ok()
+        }
+        "7bit" | "8bit" | "binary" | "" => Some(data.to_vec()),
+        _ => None,
+    }
+}
+
+/// PDF text read from mail lately, so reading on through the pages of an
+/// attachment does not download it again. Keyed by mail server, message id
+/// and attachment name; emptied when the service locks.
+type AttachmentCache = std::sync::Mutex<Vec<(String, std::sync::Arc<AttachmentPdf>)>>;
+static ATTACHMENT_CACHE: std::sync::LazyLock<AttachmentCache> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+const ATTACHMENT_CACHE_SIZE: usize = 8;
+
+fn cache_get(key: &str) -> Option<std::sync::Arc<AttachmentPdf>> {
+    let c = ATTACHMENT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    c.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, v)| v.clone())
+}
+
+fn cache_put(key: String, pdf: AttachmentPdf) -> std::sync::Arc<AttachmentPdf> {
+    let pdf = std::sync::Arc::new(pdf);
+    let mut c = ATTACHMENT_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    c.retain(|(k, _)| !k.eq_ignore_ascii_case(&key));
+    if c.len() >= ATTACHMENT_CACHE_SIZE {
+        c.remove(0);
+    }
+    c.push((key, pdf.clone()));
+    pdf
+}
+
+/// Forget the text of every attachment read so far (when the service locks).
+pub fn forget_attachments() {
+    ATTACHMENT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ATTACHMENT_CACHE.lock().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
+/// Counts locks, so a download that finishes after one is not kept.
+static ATTACHMENT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long the attachment tool waits for a download before answering that
+/// it is still reading (Claude's apps give a tool about a minute, and the
+/// answer still has to be redacted).
+pub const ATTACHMENT_WAIT: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// Downloads in progress, by message and requested name: a second request
+/// for the same attachment waits for the first instead of starting again.
+/// Each finishes with the cache key of what it read, or an error message.
+type Inflight = std::sync::Mutex<
+    std::collections::HashMap<String, tokio::sync::watch::Receiver<Option<std::result::Result<String, String>>>>,
+>;
+static ATTACHMENT_INFLIGHT: std::sync::LazyLock<Inflight> = std::sync::LazyLock::new(Default::default);
+
+fn attachment_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid(
+            "Give the attachment's name, as read or thread lists it.".into(),
+        ));
+    }
+    Ok(name)
+}
+
+/// The attachment tool. Text already read is answered at once, without
+/// connecting to the mail server. A download runs in the background: if it
+/// takes longer than `wait`, the answer says to ask again, and the next
+/// request picks up where it got to rather than timing out.
+pub async fn read_attachment(
+    account: &Account,
+    id: &str,
+    name: &str,
+    pages: Option<&str>,
+    wait: std::time::Duration,
+) -> Result<String> {
+    let name = attachment_name(name)?;
+    let id = MsgId::parse(id)?;
+    let id_text = id.to_string();
+    let render = |pdf: &AttachmentPdf| -> Result<String> {
+        Ok(format!("{UNTRUSTED}\n\n{}", render_attachment(&id_text, pdf, pages)?))
+    };
+    if let Some(pdf) = cache_get(&format!("{}\n{id_text}\n{name}", account.host)) {
+        return render(&pdf);
+    }
+    let job = format!("{}\n{id_text}\n{}", account.host, name.to_lowercase());
+    let mut rx = {
+        let mut inflight = ATTACHMENT_INFLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+        match inflight.get(&job) {
+            Some(rx) => rx.clone(),
+            None => {
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                inflight.insert(job.clone(), rx.clone());
+                let (account, id, name, job) = (account.clone(), id.clone(), name.to_string(), job.clone());
+                tokio::spawn(async move {
+                    let generation = ATTACHMENT_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+                    let read = async {
+                        let mut m = Mailer::connect(&account).await?;
+                        let r = m.attachment_pdf(&id, &name).await;
+                        m.close().await;
+                        r
+                    };
+                    let r = match tokio::time::timeout(std::time::Duration::from_secs(600), read).await {
+                        Ok(Ok(pdf)) => Ok(format!("{}\n{}\n{}", account.host, id, pdf.name)),
+                        Ok(Err(e)) => Err(e.to_string()),
+                        Err(_) => Err("Reading that attachment took too long.".to_string()),
+                    };
+                    if ATTACHMENT_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                        forget_attachments();
+                    }
+                    ATTACHMENT_INFLIGHT
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&job);
+                    let _ = tx.send(Some(r));
+                });
+                rx
+            }
+        }
+    };
+    let done = tokio::time::timeout(wait, rx.wait_for(|v| v.is_some())).await;
+    let outcome = match done {
+        Ok(Ok(v)) => v.clone(),
+        // The sender is gone without an answer: the download task ended.
+        Ok(Err(_)) => Some(Err("Reading that attachment stopped. Try again.".to_string())),
+        Err(_) => None,
+    };
+    match outcome {
+        Some(Ok(key)) => match cache_get(&key) {
+            Some(pdf) => render(&pdf),
+            None => Err(Error::Invalid("Pātaka was locked while reading that attachment. Try again.".into())),
+        },
+        Some(Err(msg)) => Err(Error::Invalid(msg)),
+        None => Ok(format!(
+            "Still downloading {name} from the mail server: it is large, and the download goes on in the background. Call attachment again with the same id and name in about 30 seconds to get its text."
+        )),
+    }
+}
+
+/// Read the PDF attachment called `name` (or, failing an exact match, the
+/// one whose name contains it) in a whole raw message.
+fn attachment_pdf(raw: &[u8], name: &str) -> Result<AttachmentPdf> {
     let m = MessageParser::default()
         .parse(raw)
         .ok_or_else(|| Error::Invalid("That message could not be read.".into()))?;
@@ -352,64 +612,23 @@ fn attachment_text(raw: &[u8], id: &str, name: &str, pages: Option<&str>) -> Res
         .iter()
         .map(|a| a.attachment_name().unwrap_or("unnamed").to_string())
         .collect();
-    let exact: Vec<usize> = (0..parts.len())
-        .filter(|&i| names[i].eq_ignore_ascii_case(name))
-        .collect();
-    let i = match exact.as_slice() {
-        [i] => *i,
-        [i, ..] => *i,
-        [] => {
-            let close: Vec<usize> = (0..parts.len())
-                .filter(|&i| names[i].to_lowercase().contains(&name.to_lowercase()))
-                .collect();
-            match close.as_slice() {
-                [i] => *i,
-                _ => {
-                    return Err(Error::Invalid(if names.is_empty() {
-                        "That email has no attachments.".into()
-                    } else {
-                        format!(
-                            "No attachment is called \"{name}\". This email has: {}.",
-                            names.join(", ")
-                        )
-                    }))
-                }
-            }
-        }
-    };
-    let part = parts[i];
-    let bytes = part.contents();
-    let kind = part
+    let i = pick_attachment(&names, name)?;
+    let bytes = parts[i].contents();
+    let kind = parts[i]
         .content_type()
         .map(|c| match c.subtype() {
             Some(s) => format!("{}/{}", c.ctype(), s).to_lowercase(),
             None => c.ctype().to_lowercase(),
         })
         .unwrap_or_default();
-    let is_pdf = kind == "application/pdf" || names[i].to_lowercase().ends_with(".pdf") || bytes.starts_with(b"%PDF-");
-    if !is_pdf {
-        let what = if kind.starts_with("image/") {
-            "an image. Pātaka does not read images yet".to_string()
-        } else {
-            format!(
-                "a {} file. Pātaka reads the text of PDF attachments so far",
-                if kind.is_empty() { "kind of" } else { &kind }
-            )
-        };
-        return Err(Error::Invalid(format!(
-            "{} is {what}, so nothing from it was sent.",
-            names[i]
-        )));
-    }
-    let text = crate::pdf::extract(bytes).map_err(|e| Error::Invalid(format!("{}: {e}", names[i])))?;
-    let range = crate::pdf::page_range(pages, text.pages.len())?;
-    Ok(format!(
-        "attachment: {} ({}, {} page(s)), from {id}\nOnly the text was read, on this computer; pictures in it were not.\n\n{}",
-        names[i],
-        size_text(bytes.len()),
-        text.pages.len(),
-        text.render(range, ATTACHMENT_TEXT_LIMIT)
-    ))
+    check_pdf(&names[i], &kind, Some(bytes))?;
+    read_pdf(&names[i], bytes)
+}
+
+/// The text of an attachment in a whole raw message, with its heading.
+#[cfg(test)]
+fn attachment_text(raw: &[u8], id: &str, name: &str, pages: Option<&str>) -> Result<String> {
+    render_attachment(id, &attachment_pdf(raw, name)?, pages)
 }
 
 /// Decode an RFC 2047 encoded name (`=?utf-8?B?...?=`); anything else as is.
@@ -830,18 +1049,23 @@ impl Mailer {
     /// The text of one attachment, read on this computer. Only PDFs with a
     /// text layer so far; anything else is refused and nothing of it is sent.
     pub async fn attachment(&mut self, id: &str, name: &str, pages: Option<&str>) -> Result<String> {
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(Error::Invalid(
-                "Give the attachment's name, as read or thread lists it.".into(),
-            ));
-        }
+        let name = attachment_name(name)?;
         let id = MsgId::parse(id)?;
-        let uid = match &id {
+        let pdf = self.attachment_pdf(&id, name).await?;
+        Ok(format!(
+            "{UNTRUSTED}\n\n{}",
+            render_attachment(&id.to_string(), &pdf, pages)?
+        ))
+    }
+
+    /// Find, download and read the PDF attachment called `name`, or take
+    /// it from the cache.
+    async fn attachment_pdf(&mut self, id: &MsgId, name: &str) -> Result<std::sync::Arc<AttachmentPdf>> {
+        let uid = match id {
             MsgId::Gmail { .. } => {
                 let all = self.all_mail();
                 self.imap.open(&all, false).await?;
-                self.gmail_uids(std::slice::from_ref(&id)).await?[0].0
+                self.gmail_uids(std::slice::from_ref(id)).await?[0].0
             }
             MsgId::Folder { uid, mailbox } => {
                 let mb = self.folder(mailbox);
@@ -849,16 +1073,54 @@ impl Mailer {
                 *uid
             }
         };
-        // Check the size before fetching the whole message.
-        let size = self
+        let id_text = id.to_string();
+        // The structure first: it names the parts, so only the one asked for
+        // is downloaded (an email can carry several large files), and what
+        // is not a PDF is refused without downloading it at all.
+        let f = self
             .imap
-            .fetch(&[uid], "UID RFC822.SIZE")
+            .fetch(&[uid], "UID RFC822.SIZE BODYSTRUCTURE")
             .await?
             .into_iter()
             .next()
-            .and_then(|f| f.get("RFC822.SIZE").and_then(|t| t.text()?.parse::<usize>().ok()))
             .ok_or_else(|| Error::NotFound("that message".into()))?;
-        if size > ATTACHMENT_MESSAGE_LIMIT {
+        let size = f.get("RFC822.SIZE").and_then(|t| t.text()?.parse::<usize>().ok());
+        let mut leaves = Vec::new();
+        if let Some(bs) = f.get("BODYSTRUCTURE") {
+            structure_leaves(bs, "", &mut leaves);
+        }
+        if !leaves.is_empty() {
+            let names: Vec<String> = leaves.iter().map(|l| l.name.clone()).collect();
+            let leaf = &leaves[pick_attachment(&names, name)?];
+            let key = format!("{}\n{id_text}\n{}", self.host, leaf.name);
+            if let Some(pdf) = cache_get(&key) {
+                return Ok(pdf);
+            }
+            check_pdf(&leaf.name, &leaf.kind, None)?;
+            if leaf.size > crate::pdf::MAX_BYTES {
+                return Err(Error::Invalid(format!(
+                    "{} is {}; Pātaka reads PDFs up to {}.",
+                    leaf.name,
+                    size_text(leaf.size),
+                    size_text(crate::pdf::MAX_BYTES)
+                )));
+            }
+            let item = format!("BODY[{}]", leaf.section);
+            let part = self
+                .imap
+                .fetch(&[uid], &format!("UID BODY.PEEK[{}]", leaf.section))
+                .await?
+                .into_iter()
+                .next()
+                .and_then(|f| f.section(&item).and_then(|b| decode_part(b, &leaf.enc)));
+            if let Some(bytes) = part {
+                check_pdf(&leaf.name, &leaf.kind, Some(&bytes))?;
+                return Ok(cache_put(key, read_pdf(&leaf.name, &bytes)?));
+            }
+            // An encoding not decoded here, or a part the server would not
+            // send alone: read the whole message instead.
+        }
+        if let Some(size) = size.filter(|&n| n > ATTACHMENT_MESSAGE_LIMIT) {
             return Err(Error::Invalid(format!(
                 "That email is {}; Pātaka opens attachments in emails up to {}.",
                 size_text(size),
@@ -875,8 +1137,8 @@ impl Mailer {
         let raw = f
             .body()
             .ok_or_else(|| Error::Invalid("That message could not be read.".into()))?;
-        let text = attachment_text(raw, &id.to_string(), name, pages)?;
-        Ok(format!("{UNTRUSTED}\n\n{text}"))
+        let pdf = attachment_pdf(raw, name)?;
+        Ok(cache_put(format!("{}\n{id_text}\n{}", self.host, pdf.name), pdf))
     }
 
     /// Items for a whole message. Always `BODY.PEEK`, so reading never marks
@@ -1887,6 +2149,31 @@ mod structure_tests {
     }
 
     #[test]
+    fn attachments_know_their_part_numbers() {
+        // Text and HTML inside related (1.1.x), an inline image (1.2), then
+        // the PDF (2): only the PDF part is downloaded to read it.
+        let bs = br#"(((("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "QUOTED-PRINTABLE" 1200 40 NIL NIL NIL)("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "QUOTED-PRINTABLE" 5000 90 NIL NIL NIL) "ALTERNATIVE" ("BOUNDARY" "b1") NIL NIL)("IMAGE" "PNG" ("NAME" "image001.png") "<i1>" NIL "BASE64" 4000 NIL ("inline" ("FILENAME" "image001.png")) NIL) "RELATED" ("BOUNDARY" "b2") NIL NIL)("APPLICATION" "PDF" ("NAME" "ChromaDCNN.pdf") NIL NIL "BASE64" 8000000 NIL ("attachment" ("FILENAME" "ChromaDCNN.pdf")) NIL) "MIXED" ("BOUNDARY" "b3") NIL NIL)"#;
+        let mut out = Vec::new();
+        super::structure_leaves(&tokenize(bs)[0], "", &mut out);
+        let got: Vec<(&str, &str, &str, &str)> = out
+            .iter()
+            .map(|l| (l.section.as_str(), l.name.as_str(), l.kind.as_str(), l.enc.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("1.2", "image001.png", "image/png", "base64"),
+                ("2", "ChromaDCNN.pdf", "application/pdf", "base64")
+            ]
+        );
+        // A message that is only a PDF has it at section 1.
+        let one = br#"("APPLICATION" "PDF" ("NAME" "scan.pdf") NIL NIL "BASE64" 400 NIL ("attachment" ("FILENAME" "scan.pdf")) NIL)"#;
+        let mut out = Vec::new();
+        super::structure_leaves(&tokenize(one)[0], "", &mut out);
+        assert_eq!(out[0].section, "1");
+    }
+
+    #[test]
     fn a_cut_message_still_has_its_text() {
         let pdf = "QUJD".repeat(20_000);
         let raw = format!(
@@ -1981,6 +2268,38 @@ mod attachment_tests {
         // A unique part of the name is enough, and pages narrow it down.
         let t = attachment_text(&raw, "mail_1", "comments", Some("2")).unwrap();
         assert!(t.contains("about results") && !t.contains("dilated"), "{t}");
+    }
+
+    #[test]
+    fn reads_a_pdf_from_its_part_alone() {
+        use super::{cache_get, cache_put, check_pdf, decode_part, read_pdf, render_attachment};
+        let pdf = crate::pdf::tests::pdf(&[
+            "Only this part was downloaded, nothing else.",
+            "Page two holds the results and discussion.",
+        ]);
+        // As a server sends one section: base64 in lines of 76.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&pdf);
+        let wire: String = b64
+            .as_bytes()
+            .chunks(76)
+            .map(|c| format!("{}\r\n", std::str::from_utf8(c).unwrap()))
+            .collect();
+        let bytes = decode_part(wire.as_bytes(), "base64").unwrap();
+        assert_eq!(bytes, pdf);
+        assert!(decode_part(b"x", "quoted-printable").is_none());
+        assert!(check_pdf("notes.pdf", "application/pdf", Some(&bytes)).unwrap());
+        // A generic part is looked at before it is refused or read.
+        assert!(!check_pdf("file", "application/octet-stream", None).unwrap());
+        assert!(check_pdf("file", "application/octet-stream", Some(&bytes)).unwrap());
+        assert!(check_pdf("figure.png", "image/png", None).is_err());
+        // Read once; later pages come from the cache.
+        let key = "test-host\nmail_part\nnotes.pdf".to_string();
+        cache_put(key.clone(), read_pdf("notes.pdf", &bytes).unwrap());
+        let cached = cache_get(&key).unwrap();
+        let t = render_attachment("mail_part", &cached, Some("2")).unwrap();
+        assert!(t.contains("Page two") && !t.contains("Only this part"), "{t}");
+        super::forget_attachments();
+        assert!(cache_get(&key).is_none());
     }
 
     #[test]

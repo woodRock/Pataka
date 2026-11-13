@@ -178,52 +178,57 @@ impl PdfText {
     }
 }
 
+/// A small PDF with one page per string, so tests need no files. Not
+/// for anything else.
+#[doc(hidden)]
+pub fn sample(pages: &[&str]) -> Vec<u8> {
+    let mut objs: Vec<String> = Vec::new();
+    // 1: catalog, 2: pages, 3: font, then a page and its content each.
+    let kids: Vec<String> = (0..pages.len()).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+    objs.push("<< /Type /Catalog /Pages 2 0 R >>".into());
+    objs.push(format!(
+        "<< /Type /Pages /Kids [{}] /Count {} >>",
+        kids.join(" "),
+        pages.len()
+    ));
+    objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
+    for (i, text) in pages.iter().enumerate() {
+        let mut stream = String::from("BT /F1 12 Tf 72 720 Td 14 TL\n");
+        for line in text.lines() {
+            let esc = line.replace('\\', "\\\\").replace('(', "\\(").replace(')', "\\)");
+            stream.push_str(&format!("({esc}) Tj T*\n"));
+        }
+        stream.push_str("ET");
+        objs.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+            5 + 2 * i
+        ));
+        objs.push(format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()));
+    }
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+    }
+    let xref = out.len();
+    out.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1));
+    for o in offsets {
+        out.push_str(&format!("{o:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+        objs.len() + 1
+    ));
+    out.into_bytes()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
-    /// A small PDF with one page per string, built here so the tests need
-    /// no files.
     pub(crate) fn pdf(pages: &[&str]) -> Vec<u8> {
-        let mut objs: Vec<String> = Vec::new();
-        // 1: catalog, 2: pages, 3: font, then a page and its content each.
-        let kids: Vec<String> = (0..pages.len()).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
-        objs.push("<< /Type /Catalog /Pages 2 0 R >>".into());
-        objs.push(format!(
-            "<< /Type /Pages /Kids [{}] /Count {} >>",
-            kids.join(" "),
-            pages.len()
-        ));
-        objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
-        for (i, text) in pages.iter().enumerate() {
-            let mut stream = String::from("BT /F1 12 Tf 72 720 Td 14 TL\n");
-            for line in text.lines() {
-                let esc = line.replace('\\', "\\\\").replace('(', "\\(").replace(')', "\\)");
-                stream.push_str(&format!("({esc}) Tj T*\n"));
-            }
-            stream.push_str("ET");
-            objs.push(format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
-                5 + 2 * i
-            ));
-            objs.push(format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()));
-        }
-        let mut out = String::from("%PDF-1.4\n");
-        let mut offsets = Vec::new();
-        for (i, o) in objs.iter().enumerate() {
-            offsets.push(out.len());
-            out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
-        }
-        let xref = out.len();
-        out.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1));
-        for o in offsets {
-            out.push_str(&format!("{o:010} 00000 n \n"));
-        }
-        out.push_str(&format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-            objs.len() + 1
-        ));
-        out.into_bytes()
+        super::sample(pages)
     }
 
     #[test]
