@@ -58,10 +58,7 @@ pub fn parse(written: &str) -> Option<Name> {
             .collect()
     };
     let (family_words, given_words): (Vec<String>, Vec<String>) = if let Some((f, g)) = s.split_once(',') {
-        (
-            f.split_whitespace().map(String::from).collect(),
-            words(g),
-        )
+        (f.split_whitespace().map(String::from).collect(), words(g))
     } else {
         let mut tokens: Vec<String> = s.split_whitespace().map(String::from).collect();
         while tokens.len() > 1 && TITLES.contains(&fold(tokens[0].trim_end_matches('.')).as_str()) {
@@ -101,7 +98,9 @@ pub fn compatible(a: &Name, b: &Name) -> bool {
         return false;
     }
     a.given.iter().zip(&b.given).all(|(x, y)| {
-        x == y || (x.chars().count() == 1 && y.starts_with(x.as_str())) || (y.chars().count() == 1 && x.starts_with(y.as_str()))
+        x == y
+            || (x.chars().count() == 1 && y.starts_with(x.as_str()))
+            || (y.chars().count() == 1 && x.starts_with(y.as_str()))
     })
 }
 
@@ -219,8 +218,8 @@ const YEAR: &str = r"(?:1[6-9]|20)\d{2}[a-z]?";
 
 /// Words that sit where a cited surname would but are not one.
 const NOT_SURNAMES: [&str; 24] = [
-    "act", "and", "appendix", "chapter", "eq", "equation", "fig", "figure", "in", "january", "june", "july",
-    "march", "may", "note", "part", "section", "see", "since", "table", "the", "version", "volume", "year",
+    "act", "and", "appendix", "chapter", "eq", "equation", "fig", "figure", "in", "january", "june", "july", "march",
+    "may", "note", "part", "section", "see", "since", "table", "the", "version", "volume", "year",
 ];
 
 static PAREN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(([^()]{4,400})\)").expect("pattern compiles"));
@@ -240,21 +239,28 @@ static REFERENCES_HEADING: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?mi)^\s*(?:\d+\.?\s*|[ivx]+\.\s*)?(?:references|bibliography|works cited|literature cited|reference list|ngā tohutoro)\s*$")
         .expect("pattern compiles")
 });
-static ABSTRACT_HEADING: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?mi)^\s*(?:abstract|summary|tuhinga whakarāpopoto)\b[.:—-]?").expect("pattern compiles"));
+static ABSTRACT_HEADING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?mi)^\s*(?:abstract|summary|tuhinga whakarāpopoto)\b[.:—-]?").expect("pattern compiles")
+});
 static SURNAME_INITIALS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r"({SURNAME}(?:\s\p{{Lu}}[\p{{L}}'’-]+)?),\s((?:\p{{Lu}}\.(?:\s?-?\s?\p{{Lu}}\.)*\s?){{1,4}})"))
-        .expect("pattern compiles")
+    Regex::new(&format!(
+        r"({SURNAME}(?:\s\p{{Lu}}[\p{{L}}'’-]+)?),\s((?:\p{{Lu}}\.(?:\s?-?\s?\p{{Lu}}\.)*\s?){{1,4}})"
+    ))
+    .expect("pattern compiles")
 });
 static INITIALS_SURNAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r"(?:^|[\s,\]])((?:\p{{Lu}}\.\s?-?){{1,4}})\s?({SURNAME})"))
-        .expect("pattern compiles")
+    Regex::new(&format!(r"(?:^|[\s,\]])((?:\p{{Lu}}\.\s?-?){{1,4}})\s?({SURNAME})")).expect("pattern compiles")
 });
 static FULL_NAME_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r#"(?m)^\s*(?:\[\d+\]\s*)?([^.\[\]\n“"]{{3,300}}?)(?:\.\s+{YEAR}\.|,\s*[“"])"#)).expect("pattern compiles")
+    Regex::new(&format!(
+        r#"(?m)^\s*(?:\[\d+\]\s*)?([^.\[\]\n“"]{{3,300}}?)(?:\.\s+{YEAR}\.|,\s*[“"])"#
+    ))
+    .expect("pattern compiles")
 });
-static FULL_NAME: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\p{Lu}[\p{L}'’.-]*(?:\s+(?:(?:de|van|von|der|di|da|du|le)\s+)?\p{Lu}[\p{L}'’.-]*){1,3}$").expect("pattern compiles"));
+static FULL_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\p{Lu}[\p{L}'’.-]*(?:\s+(?:(?:de|van|von|der|di|da|du|le)\s+)?\p{Lu}[\p{L}'’.-]*){1,3}$")
+        .expect("pattern compiles")
+});
 
 /// Surnames in a list of cited names: `Rocher, Hendrickx and de Montjoye et al.`.
 fn split_surnames(names: &str) -> Vec<String> {
@@ -331,7 +337,14 @@ mod tests {
     #[test]
     fn forms_of_one_name_are_compatible() {
         let full = n("Latanya Sweeney");
-        for form in ["Sweeney, Latanya", "L. Sweeney", "Sweeney, L.", "SWEENEY", "Sweeney", "Dr Latanya Sweeney"] {
+        for form in [
+            "Sweeney, Latanya",
+            "L. Sweeney",
+            "Sweeney, L.",
+            "SWEENEY",
+            "Sweeney",
+            "Dr Latanya Sweeney",
+        ] {
             assert!(compatible(&full, &n(form)), "{form}");
         }
         assert!(!compatible(&full, &n("Mary Sweeney")));
@@ -346,8 +359,12 @@ mod tests {
     #[test]
     fn authors_are_found_in_bib_json_and_yaml() {
         let bib = "@article{x,\n  author    = {Hui Yang and Jonathan M. Garibaldi},\n  editor = \"Sm{\\'i}th, Ana\",\n  title = {About Someone Else}\n}";
-        assert_eq!(bibliographic_names(bib), ["Hui Yang", "Jonathan M. Garibaldi", "Smith, Ana"]);
-        let json = r#"{"key": "sweeney2002kanonymity", "authors": ["Latanya Sweeney", "Luc Rocher"], "title": "Not A Name"}"#;
+        assert_eq!(
+            bibliographic_names(bib),
+            ["Hui Yang", "Jonathan M. Garibaldi", "Smith, Ana"]
+        );
+        let json =
+            r#"{"key": "sweeney2002kanonymity", "authors": ["Latanya Sweeney", "Luc Rocher"], "title": "Not A Name"}"#;
         assert_eq!(bibliographic_names(json), ["Latanya Sweeney", "Luc Rocher"]);
         let yaml = "---\nkey: x\nauthors: [Latanya Sweeney, 'Mere Te Huia']\nyear: 2002\n";
         assert_eq!(bibliographic_names(yaml), ["Latanya Sweeney", "Mere Te Huia"]);
@@ -366,7 +383,10 @@ mod tests {
         for n in ["Sweeney", "Rocher", "Narayanan", "Shmatikov", "Ohm", "de Montjoye"] {
             assert!(names.iter().any(|x| x == n), "{n} missing from {names:?}");
         }
-        assert!(!names.iter().any(|x| x.contains("Kereama") || x == "Table"), "{names:?}");
+        assert!(
+            !names.iter().any(|x| x.contains("Kereama") || x == "Table"),
+            "{names:?}"
+        );
     }
 
     #[test]
@@ -376,10 +396,20 @@ mod tests {
             [12] L. Rocher, J. M. Hendrickx, and Y.-A. de Montjoye, “Estimating the success of re-identifications,” Nat. Commun., 2019.\n\
             Arvind Narayanan and Vitaly Shmatikov. 2008. Robust de-anonymization of large sparse datasets. In S&P.\n";
         let names = cited_names(text);
-        for n in ["Sweeney, L.", "L. Rocher", "J. M. Hendrickx", "Y.-A. de Montjoye", "Arvind Narayanan", "Vitaly Shmatikov"] {
+        for n in [
+            "Sweeney, L.",
+            "L. Rocher",
+            "J. M. Hendrickx",
+            "Y.-A. de Montjoye",
+            "Arvind Narayanan",
+            "Vitaly Shmatikov",
+        ] {
             assert!(names.iter().any(|x| x == n), "{n} missing from {names:?}");
         }
-        assert!(!names.iter().any(|x| x.contains("Tipene")), "prose before the references: {names:?}");
+        assert!(
+            !names.iter().any(|x| x.contains("Tipene")),
+            "prose before the references: {names:?}"
+        );
     }
 
     #[test]

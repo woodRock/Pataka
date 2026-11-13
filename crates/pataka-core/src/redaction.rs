@@ -1233,11 +1233,17 @@ mod record_key_tests {
         let text = "id abd7e9a108 by tumataiti-student@ad7ac37";
         run(
             text,
-            &[span(text, "abd7e9a108", Category::Person), span(text, "tumataiti-student@ad7ac37", Category::Email)],
+            &[
+                span(text, "abd7e9a108", Category::Person),
+                span(text, "tumataiti-student@ad7ac37", Category::Email),
+            ],
             &mut v,
         );
         // Plant them as an older model would have.
-        for (cat, value) in [(Category::OtherId, "abd7e9a108"), (Category::Email, "tumataiti-student@ad7ac37")] {
+        for (cat, value) in [
+            (Category::OtherId, "abd7e9a108"),
+            (Category::Email, "tumataiti-student@ad7ac37"),
+        ] {
             let p = format!("[{}_9]", cat.label());
             v.placeholders.insert(p.clone(), value.into());
             v.entities.insert(entity_key(cat, value), p);
@@ -1278,22 +1284,40 @@ mod name_form_tests {
     #[test]
     fn forms_of_one_name_share_a_number_and_restore_exactly() {
         let mut v = Vault::default();
-        assert_eq!(run("By Aroha Kereama.", &["Aroha Kereama"], &mut v), format!("By {}.", ph(1, "")));
+        assert_eq!(
+            run("By Aroha Kereama.", &["Aroha Kereama"], &mut v),
+            format!("By {}.", ph(1, ""))
+        );
         let text = "Kereama, A. and later Kereama alone.";
         let mut alone = span(text, "Kereama");
         alone.start = text.rfind("Kereama").unwrap();
         alone.end = alone.start + "Kereama".len();
-        let out = redact(text, &Kaupapa::default(), &[], &[], &[span(text, "Kereama, A."), alone], &mut v).output;
+        let out = redact(
+            text,
+            &Kaupapa::default(),
+            &[],
+            &[],
+            &[span(text, "Kereama, A."), alone],
+            &mut v,
+        )
+        .output;
         assert_eq!(out, format!("{} and later {} alone.", ph(1, "B"), ph(1, "C")));
         assert_eq!(restore(&out, &v), "Kereama, A. and later Kereama alone.");
         // Another person is a new number.
-        assert_eq!(run("Then Mere Tipene.", &["Mere Tipene"], &mut v), format!("Then {}.", ph(2, "")));
+        assert_eq!(
+            run("Then Mere Tipene.", &["Mere Tipene"], &mut v),
+            format!("Then {}.", ph(2, ""))
+        );
     }
 
     #[test]
     fn a_shared_surname_is_not_linked_to_either_person() {
         let mut v = Vault::default();
-        run("Aroha Kereama and Hemi Kereama.", &["Aroha Kereama", "Hemi Kereama"], &mut v);
+        run(
+            "Aroha Kereama and Hemi Kereama.",
+            &["Aroha Kereama", "Hemi Kereama"],
+            &mut v,
+        );
         let out = run("Ask Kereama.", &["Kereama"], &mut v);
         assert_eq!(out, format!("Ask {}.", ph(3, "")));
         // An initial still tells them apart.
@@ -1310,7 +1334,10 @@ mod name_form_tests {
         let json = r#"{"key": "kereama2020x", "authors": ["Aroha Kereama"]}"#;
         assert_eq!(run(json, &["Aroha Kereama"], &mut v), json);
         let byline = "KEREAMA, A. (2020). As Kereama argues, and Aroha Kereama wrote it.";
-        assert_eq!(run(byline, &["KEREAMA, A.", "Kereama", "Aroha Kereama"], &mut v), byline);
+        assert_eq!(
+            run(byline, &["KEREAMA, A.", "Kereama", "Aroha Kereama"], &mut v),
+            byline
+        );
         // Someone else with the surname is still hidden.
         assert!(!run("Hemi Kereama replied.", &["Hemi Kereama"], &mut v).contains("Hemi"));
         // Public names are not saved with the kōrero.
