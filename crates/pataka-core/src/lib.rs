@@ -24,6 +24,7 @@ pub mod mail;
 pub mod model;
 pub mod model_install;
 pub mod paths;
+pub mod pdf;
 pub mod providers;
 pub mod redaction;
 pub mod sovereignty;

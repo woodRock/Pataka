@@ -435,6 +435,24 @@ async fn control(st: &ProxyState, session: &Session, method: &Method, action: &s
                 Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Pātaka could not check this text."),
             }
         }
+        // For the mod: the text of a PDF (base64), read on this computer. The
+        // mod redacts it with everything else in the row before it is stored.
+        (Method::POST, "pdf-text") => {
+            let Ok(v) = serde_json::from_slice::<Value>(body) else {
+                return error(StatusCode::BAD_REQUEST, "Pātaka could not read this request.");
+            };
+            if st.host.status()["locked"] == true {
+                return json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": "Pātaka is locked."}));
+            }
+            let block = serde_json::json!({"type": "document", "title": v["title"],
+                "source": {"type": "base64", "media_type": "application/pdf", "data": v["data"]}});
+            match tokio::task::spawn_blocking(move || redact::document_text(&block)).await {
+                Ok(Ok(Some(text))) => json_response(StatusCode::OK, serde_json::json!({"text": text})),
+                Ok(Ok(None)) => error(StatusCode::UNPROCESSABLE_ENTITY, "That is not a PDF."),
+                Ok(Err(why)) => json_response(StatusCode::UNPROCESSABLE_ENTITY, serde_json::json!({"error": why})),
+                Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Pātaka could not read this PDF."),
+            }
+        }
         (Method::POST, "restore") => {
             let Ok(mut v) = serde_json::from_slice::<Value>(body) else {
                 return error(StatusCode::BAD_REQUEST, "Pātaka could not read this request.");

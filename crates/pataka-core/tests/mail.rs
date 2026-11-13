@@ -587,7 +587,7 @@ async fn mail_end_to_end() {
         .json()
         .await
         .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
     // Not for sessions without mail, and never for a browser.
     let r = client
         .post(format!("{other}/pataka/mcp"))

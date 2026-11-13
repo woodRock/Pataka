@@ -1232,6 +1232,15 @@ mod tests {
             .unwrap();
         assert_eq!(v["value"]["command"], "mail hemi.te.rangi@example.co.nz");
         assert_eq!(v["value"]["n"], 3);
+        // A PDF's text, for the mod to redact; anything else is refused.
+        let r = http
+            .post(format!("{base}/pataka/pdf-text"))
+            .json(&json!({"data": "bm90IGEgcGRm"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 422);
+        assert!(r.text().await.unwrap().contains("not a PDF"));
 
         // Locking again refuses requests and forgets the placeholders in memory.
         assert_eq!(
@@ -1240,7 +1249,7 @@ mod tests {
         );
         assert_eq!(ask().send().await.unwrap().status(), 400);
         assert!(host.vault.lock().unwrap().placeholders.is_empty());
-        for action in ["redact", "restore"] {
+        for action in ["redact", "restore", "pdf-text"] {
             let r = http
                 .post(format!("{base}/pataka/{action}"))
                 .json(&json!({"texts": ["x"], "value": "[EMAIL_1]"}))

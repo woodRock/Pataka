@@ -130,6 +130,7 @@ Run `pataka claude` as usual. While a mailbox is connected, Claude Code gets the
 |---|---|---|
 | `search` | Gmail search syntax (`from:`, `label:`, `is:unread`, `after:2026/01/31` …). Lists id, date, sender, subject, labels and a snippet, up to 50 at a time | no |
 | `read` | One message as plain text, with attachment names and sizes | no |
+| `attachment` | The text of a PDF attachment, read on this computer and redacted like an email. Long PDFs come a part at a time (`pages: "5-"`). Images, scanned PDFs and other files are refused, and nothing of them is sent | no |
 | `thread` | A whole Gmail thread, oldest first: every message with date, sender, recipients, labels and UNREAD or read | no |
 | `drafts` | Drafts, newest first (a message still in Drafts has not been sent) | no |
 | `list_labels` | Labels or folders, with counts | no |
@@ -229,7 +230,7 @@ Be clear about where things live:
 
 - **Claude Code keeps its own transcripts** of each session in `~/.claude/projects` (Windows: `%USERPROFILE%\.claude\projects`), unencrypted, **with real values**. That is because Pātaka fills the real values back in before Claude Code sees them. It is the same as using Claude Code directly, and these files stay on your computer, but treat that folder as sensitive: back it up and delete it as you would the project. Pātaka does not encrypt or remove them.
 - **Pātaka's own store** (the placeholder vault, kaitiaki lists and settings) is encrypted in Pātaka's data folder. The audit log there records counts and destinations, never text.
-- **Anthropic receives only redacted text**: your prompts, file contents, command output and Claude Code's own instructions, with placeholders in place of personal and culturally sensitive details. Images and PDFs are withheld, because they cannot be checked. Secrets that Claude Code reads (an API key in a `.env` file, for example) are masked.
+- **Anthropic receives only redacted text**: your prompts, file contents, command output and Claude Code's own instructions, with placeholders in place of personal and culturally sensitive details. A PDF becomes its text, read on this computer and redacted like the rest (pictures in it are not read); images and scanned PDFs are withheld, because they cannot be checked yet. Secrets that Claude Code reads (an API key in a `.env` file, for example) are masked.
 
 ## Limits
 
