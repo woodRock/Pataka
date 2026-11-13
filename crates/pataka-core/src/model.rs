@@ -114,6 +114,41 @@ pub struct Kaupapa {
     pub allow_list: Vec<String>,
     /// Use the Tūmataiti name model when it is installed.
     pub use_model: bool,
+    /// Whether the names of published authors found in a paper (its byline,
+    /// reference list and citations) may go to the model.
+    pub cited_authors: CitedAuthors,
+}
+
+/// What to do with the names of published authors found in a paper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CitedAuthors {
+    /// Let them through.
+    Show,
+    /// Keep them hidden like any other name.
+    Hide,
+    /// Keep them hidden until the person answers, once, whether to show them.
+    #[default]
+    Ask,
+}
+
+impl CitedAuthors {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "show" => Some(Self::Show),
+            "hide" => Some(Self::Hide),
+            "ask" => Some(Self::Ask),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Show => "show",
+            Self::Hide => "hide",
+            Self::Ask => "ask",
+        }
+    }
 }
 
 impl Kaupapa {
@@ -135,6 +170,7 @@ impl Default for Kaupapa {
             tapu_terms: Vec::new(),
             allow_list: Vec::new(),
             use_model: true,
+            cited_authors: CitedAuthors::default(),
         }
     }
 }

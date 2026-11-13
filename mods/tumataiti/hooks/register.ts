@@ -109,7 +109,52 @@ async function call<T>($: Dollar, action: string, body: unknown): Promise<T> {
   return JSON.parse(res.text) as T
 }
 
-type Redacted = { texts: string[]; categories: Record<string, number>; tapu: boolean }
+type Redacted = { texts: string[]; categories: Record<string, number>; tapu: boolean; citedAuthors?: number }
+
+const SHOW = 'Show them'
+const HIDE = 'Keep hidden'
+const ALWAYS = 'Always show'
+/** Asked at most once per load; the service keeps the answer while it runs. */
+let citedAsked = false
+
+/** The pataka command: where the installer puts it, else on the PATH. */
+async function patakaCommand($: Dollar): Promise<string> {
+  const home = await $.env.get('HOME')
+  const local = `${home}/.local/bin/pataka`
+  return (await $.fs.exists(local)) ? local : 'pataka'
+}
+
+/**
+ * Ask, once, whether the authors a paper names (its byline, references and
+ * citations) may go to the model. Returns whether to show them. Dismissed,
+ * or with nobody to ask, they stay hidden and nothing is recorded, so a
+ * later session asks again.
+ */
+async function askAboutCited($: Dollar, n: number): Promise<boolean> {
+  if (citedAsked) return false
+  citedAsked = true
+  let answer: string
+  try {
+    answer = await $.ui.ask(
+      `This text names ${n} published author${n === 1 ? '' : 's'} in a byline, reference list or citations. Pātaka hides names by default. Show these authors' names to Claude?`,
+      { header: 'Citations', options: [SHOW, HIDE, ALWAYS] },
+    )
+  } catch {
+    return false
+  }
+  const show = answer === SHOW || answer === ALWAYS
+  await call($, 'cited-authors', { show })
+  if (answer === ALWAYS) {
+    const hint = 'Run `pataka lists cited-authors show` to always show them.'
+    try {
+      const r = await $.process.run([await patakaCommand($), 'lists', 'cited-authors', 'show'])
+      if (r.exitCode !== 0) $.ui.toast(`Tūmataiti: shown for now, but the setting was not saved. ${hint}`)
+    } catch {
+      $.ui.toast(`Tūmataiti: shown for now, but the setting was not saved. ${hint}`)
+    }
+  }
+  return show
+}
 
 async function redactTexts($: Dollar, texts: string[]): Promise<Redacted> {
   if (texts.every(t => !t.trim())) return { texts, categories: {}, tapu: false }
@@ -201,7 +246,12 @@ export const register: Register = on => {
     const slots: { get: () => string; set: (s: string) => void }[] = []
     textSlots(content, slots)
     if (slots.length === 0) return next({ ...e, message: { ...e.message, content } })
-    const r = await redactTexts($, slots.map(s => s.get()))
+    const originals = slots.map(s => s.get())
+    let r = await redactTexts($, originals)
+    // Cited authors held back: ask once, and if they may go, check again.
+    if (!r.tapu && (r.citedAuthors ?? 0) > 0 && (await askAboutCited($, r.citedAuthors ?? 0))) {
+      r = await redactTexts($, originals)
+    }
     if (r.tapu) {
       return next({ ...e, message: { ...e.message, content: withheld(content) } })
     }
