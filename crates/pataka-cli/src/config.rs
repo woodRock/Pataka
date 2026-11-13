@@ -102,9 +102,13 @@ pub fn cited_authors(choice: &str) -> Result<i32> {
     let ctx = Ctx::open()?;
     ctx.update_settings(|s| s.kaupapa.cited_authors = c)?;
     let what = match c {
-        pataka_core::model::CitedAuthors::Show => "The authors a paper names (byline, references, citations) now go to the model.",
+        pataka_core::model::CitedAuthors::Show => {
+            "The authors a paper names (byline, references, citations) now go to the model."
+        }
         pataka_core::model::CitedAuthors::Hide => "The authors a paper names are now hidden like any other name.",
-        pataka_core::model::CitedAuthors::Ask => "Pātaka will ask, once while it runs, before showing the authors a paper names.",
+        pataka_core::model::CitedAuthors::Ask => {
+            "Pātaka will ask, once while it runs, before showing the authors a paper names."
+        }
     };
     println!("{what} It applies straight away.");
     Ok(0)

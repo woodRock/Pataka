@@ -462,17 +462,29 @@ async fn control(st: &ProxyState, session: &Session, method: &Method, action: &s
         // The person's answer to whether cited authors may go to the model,
         // kept while the service runs: {"show": true|false}.
         (Method::POST, "cited-authors") => {
-            let Some(show) = serde_json::from_slice::<Value>(body).ok().and_then(|v| v["show"].as_bool()) else {
+            let Some(show) = serde_json::from_slice::<Value>(body)
+                .ok()
+                .and_then(|v| v["show"].as_bool())
+            else {
                 return error(StatusCode::BAD_REQUEST, "Pātaka could not read this request.");
             };
             if st.host.status()["locked"] == true {
                 return json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": "Pātaka is locked."}));
             }
-            session.vault.lock().unwrap_or_else(|p| p.into_inner()).answer_cited(show);
+            session
+                .vault
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .answer_cited(show);
             let _ = audit::append(
                 &st.host.audit_path(),
                 audit::Entry {
-                    event: if show { "cited-authors-shown" } else { "cited-authors-hidden" }.into(),
+                    event: if show {
+                        "cited-authors-shown"
+                    } else {
+                        "cited-authors-hidden"
+                    }
+                    .into(),
                     korero: Some(session.korero.clone()),
                     ..Default::default()
                 },

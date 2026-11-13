@@ -139,7 +139,9 @@ pub fn run(command: Vec<String>) -> Result<i32> {
         args.remove(0);
     }
     if args.is_empty() {
-        return Err(Error::Invalid("Give a command to run: pataka run -- <command> [arguments]".into()));
+        return Err(Error::Invalid(
+            "Give a command to run: pataka run -- <command> [arguments]".into(),
+        ));
     }
     if args.iter().any(|a| may_hold_placeholder(a)) {
         let url = restore_url().ok_or_else(|| {
@@ -149,7 +151,11 @@ pub fn run(command: Vec<String>) -> Result<i32> {
         })?;
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let res: std::result::Result<(u16, Value), reqwest::Error> = rt.block_on(async {
-            let r = reqwest::Client::new().post(&url).json(&json!({"value": args})).send().await?;
+            let r = reqwest::Client::new()
+                .post(&url)
+                .json(&json!({"value": args}))
+                .send()
+                .await?;
             let status = r.status().as_u16();
             Ok((status, r.json().await?))
         });
