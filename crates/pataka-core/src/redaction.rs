@@ -185,13 +185,74 @@ fn strip_honorifics(text: &str, span: &mut Span) {
     }
 }
 
+/// An email address in shape: something, `@`, and a domain with a dot in it.
+/// `tool@1a2b3c4` (a model name with its revision) is not one.
+fn looks_like_email(s: &str) -> bool {
+    let Some((local, domain)) = s.trim().rsplit_once('@') else {
+        return false;
+    };
+    let tld = domain.rsplit_once('.').map(|(_, t)| t).unwrap_or("");
+    !local.is_empty() && tld.len() >= 2 && tld.chars().all(char::is_alphabetic)
+}
+
+/// A hex id: a commit hash, a content hash or a record id like `abd7e9a108`.
+/// Lowercase hex with both digits and letters, 7 to 40 characters (a git
+/// SHA at most: a longer hex string the model calls a secret stays hidden).
+fn hex_id(s: &str) -> bool {
+    (7..=40).contains(&s.len())
+        && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        && s.chars().any(|c| c.is_ascii_digit())
+        && s.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+static CITATION_KEY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^[A-Za-z][A-Za-z'-]{0,40}:?(?:1[6-9]|20)\d{2}[A-Za-z0-9_-]{0,40}$").expect("pattern compiles")
+});
+
+/// A citation key like `kukutai2024science` or `Smith:2020a`: a word, a year
+/// and maybe more. Needed to match claims to papers, and not secret.
+fn citation_key(s: &str) -> bool {
+    CITATION_KEY.is_match(s)
+}
+
+/// Ids and keys the name model takes for secrets, IDs or names. They identify
+/// a record, not a person, and the agent must be able to type them back.
+fn record_key(s: &str) -> bool {
+    hex_id(s) || citation_key(s)
+}
+
+/// The word around `start..end`: letters, digits, `_` and `:`, so a model
+/// span over part of `tmr2018principles` is judged by the whole key.
+fn enclosing_word(text: &str, start: usize, end: usize) -> &str {
+    if start > end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return "";
+    }
+    let part = |c: char| c.is_alphanumeric() || matches!(c, '_' | ':');
+    let mut s = start;
+    while let Some(c) = text[..s].chars().next_back().filter(|c| part(*c)) {
+        s -= c.len_utf8();
+    }
+    let mut e = end;
+    while let Some(c) = text[e..].chars().next().filter(|c| part(*c)) {
+        e += c.len_utf8();
+    }
+    text[s..e].trim_matches(':')
+}
+
+/// Whether a model span is one to ignore: an "email" that is not an address,
+/// or any span that falls on a hex id or citation key.
+fn model_misfire(text: &str, s: &Span) -> bool {
+    (s.category == Category::Email && !looks_like_email(&s.text)) || record_key(enclosing_word(text, s.start, s.end))
+}
+
 /// Clean the name model's spans before they are trusted: drop fragments that
-/// identify no one, take titles off names, and join a first and last name the
-/// model returned as two spans, so a person gets one placeholder however the
-/// model split them.
+/// identify no one, ids and keys it mistakes for secrets, take titles off
+/// names, and join a first and last name the model returned as two spans, so
+/// a person gets one placeholder however the model split them.
 fn tidy_model_spans(text: &str, model: &[Span]) -> Vec<Span> {
     let mut spans: Vec<Span> = model
         .iter()
+        .filter(|s| !model_misfire(text, s))
         .cloned()
         .map(|mut s| {
             if s.category == Category::Person {
@@ -356,9 +417,12 @@ fn fill_known(text: &str, kaupapa: &Kaupapa, extra_allow: &[String], vault: &Vau
     term_spans(text, &known_terms(vault), "korero_term", &mut known);
     // A name is caught again only where it is written as one: `Mark` the
     // person, not "mark as read".
+    // Nor where it is joined by `_` into an identifier: `NAME_AGENT` is an
+    // environment variable, not the person.
     known.retain(|k| {
+        let glued = text[..k.start].ends_with('_') || text[k.end..].starts_with('_');
         !matches!(k.category, Category::Person | Category::Affiliation)
-            || k.text.chars().next().is_some_and(char::is_uppercase)
+            || (k.text.chars().next().is_some_and(char::is_uppercase) && !glued)
     });
     if known.is_empty() {
         return;
@@ -397,7 +461,10 @@ fn known_terms(vault: &Vault) -> Vec<Term> {
             let label = key.split('|').next()?;
             let category = Category::ALL.into_iter().find(|c| c.label() == label)?;
             let term = vault.placeholders.get(placeholder)?.clone();
-            (substantial(category, &term) && alnum_count(&term) >= 3).then_some(Term { term, category })
+            // An older model's misfires (a hex id, a citation key, a model
+            // name taken for an email) are not caught again either.
+            let misfire = record_key(term.trim()) || (category == Category::Email && !looks_like_email(&term));
+            (substantial(category, &term) && alnum_count(&term) >= 3 && !misfire).then_some(Term { term, category })
         })
         .collect()
 }
@@ -967,5 +1034,88 @@ mod precision_tests {
             out.contains("cc: ") && out.contains(", info <"),
             "unrelated text changed"
         );
+    }
+}
+
+#[cfg(test)]
+mod record_key_tests {
+    use super::*;
+
+    fn span(text: &str, needle: &str, category: Category) -> Span {
+        let start = text.find(needle).unwrap();
+        Span {
+            start,
+            end: start + needle.len(),
+            text: needle.into(),
+            category,
+            confidence: 0.95,
+            source: Source::Model,
+            detector: "test-model".into(),
+            checksum: Checksum::None,
+            note: None,
+        }
+    }
+
+    fn run(text: &str, model: &[Span], v: &mut Vault) -> String {
+        redact(text, &Kaupapa::default(), &[], &[], model, v).output
+    }
+
+    #[test]
+    fn hex_ids_are_not_taken_for_ids_or_secrets() {
+        let text = "Claim abd7e9a108 cites commit 4b4a5d0.";
+        let model = [
+            span(text, "abd7e9a108", Category::OtherId),
+            span(text, "4b4a5d0", Category::Secret),
+        ];
+        let mut v = Vault::default();
+        assert_eq!(run(text, &model, &mut v), text);
+    }
+
+    #[test]
+    fn citation_keys_are_left_whole() {
+        let text = r#"{"keys": ["tmr2018principles"], "verdict": {"key": "tmr2018principles"}} Smith:2020a"#;
+        let at = text.rfind("tmr2018principles").unwrap();
+        let mut partial = span(text, "tmr2018", Category::Secret);
+        partial.start = at;
+        partial.end = at + "tmr2018".len();
+        let model = [partial, span(text, "Smith:2020a", Category::Person)];
+        let mut v = Vault::default();
+        assert_eq!(run(text, &model, &mut v), text);
+    }
+
+    #[test]
+    fn a_model_name_is_not_an_email() {
+        let text = "Names found by tumataiti-student@ad7ac37.";
+        let model = [span(text, "tumataiti-student@ad7ac37", Category::Email)];
+        let mut v = Vault::default();
+        assert_eq!(run(text, &model, &mut v), text);
+        assert!(looks_like_email("someone@example.org"));
+    }
+
+    #[test]
+    fn a_known_name_inside_an_env_var_is_left_alone() {
+        let mut v = Vault::default();
+        let first = "Ask Ruru first.";
+        run(first, &[span(first, "Ruru", Category::Person)], &mut v);
+        let out = run("Set RURU_AGENT=1, then ask Ruru.", &[], &mut v);
+        assert!(out.starts_with("Set RURU_AGENT=1, then ask [PERSON_"), "{out}");
+    }
+
+    #[test]
+    fn old_misfires_in_the_vault_are_not_caught_again() {
+        let mut v = Vault::default();
+        let text = "id abd7e9a108 by tumataiti-student@ad7ac37";
+        run(
+            text,
+            &[span(text, "abd7e9a108", Category::Person), span(text, "tumataiti-student@ad7ac37", Category::Email)],
+            &mut v,
+        );
+        // Plant them as an older model would have.
+        for (cat, value) in [(Category::OtherId, "abd7e9a108"), (Category::Email, "tumataiti-student@ad7ac37")] {
+            let p = format!("[{}_9]", cat.label());
+            v.placeholders.insert(p.clone(), value.into());
+            v.entities.insert(entity_key(cat, value), p);
+        }
+        assert_eq!(run(text, &[], &mut v), text);
     }
 }

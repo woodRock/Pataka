@@ -70,6 +70,13 @@ pub fn agent_kaupapa(k: &Kaupapa) -> Kaupapa {
         if *action == Action::Block && *cat != Category::CulturalRestricted {
             *action = Action::Mask;
         }
+        // An ID the model finds (one with no valid check digits) gets its own
+        // placeholder rather than one shared `[ID]`: the agent can tell two
+        // apart, and a placeholder it types into a local command is restored
+        // to the real value, which `[ID]` never could be.
+        if *cat == Category::OtherId && *action == Action::Mask {
+            *action = Action::Pseudonymise;
+        }
     }
     k
 }
@@ -77,6 +84,11 @@ pub fn agent_kaupapa(k: &Kaupapa) -> Kaupapa {
 /// Is `start..end` part of a whitespace-delimited token that looks like code
 /// or a path rather than prose?
 pub fn in_code_token(text: &str, start: usize, end: usize) -> bool {
+    // A span that does not fall on characters is never sliced (slicing it
+    // would panic); treat it as code, so it is left alone.
+    if start > end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return true;
+    }
     // Whitespace can be more than one byte (a non-breaking space in an
     // email), so step over the whole character, not one byte.
     let ts = text[..start]
@@ -85,9 +97,6 @@ pub fn in_code_token(text: &str, start: usize, end: usize) -> bool {
         .find(|(_, c)| c.is_whitespace())
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
-    if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
-        return true;
-    }
     let token_end = text[end..]
         .find(char::is_whitespace)
         .map(|i| end + i)
@@ -892,6 +901,17 @@ mod tests {
 mod code_token_tests {
     use super::in_code_token;
 
+    #[test]
+    fn a_span_inside_a_wide_character_does_not_panic() {
+        // A non-breaking space is two bytes; a span starting or ending in
+        // the middle of it is left alone rather than sliced.
+        let t = "Dilated\u{a0}convolutions widen the field";
+        let mid = t.find('\u{a0}').unwrap() + 1;
+        assert!(in_code_token(t, mid, mid + 3));
+        assert!(in_code_token(t, 0, mid));
+        assert!(in_code_token(t, 5, 2));
+    }
+
     fn check(text: &str, needle: &str) -> bool {
         let start = text.find(needle).unwrap();
         in_code_token(text, start, start + needle.len())
@@ -917,5 +937,42 @@ mod code_token_tests {
     fn a_name_before_an_outlook_link_is_prose() {
         assert!(!check("Homepage Aroha<https://example.org/a_b>", "Aroha"));
         assert!(check("<https://example.org/Aroha>", "Aroha"));
+    }
+}
+
+#[cfg(test)]
+mod agent_id_tests {
+    use super::agent_kaupapa;
+    use crate::model::Kaupapa;
+    use crate::redaction::{redact, restore, Vault};
+    use tumataiti_rules::{Category, Checksum, Source, Span};
+
+    #[test]
+    fn each_model_id_gets_its_own_placeholder_that_restores() {
+        let k = agent_kaupapa(&Kaupapa::default());
+        let text = "Refs XK-99812 and XK-99813.";
+        let model: Vec<Span> = ["XK-99812", "XK-99813"]
+            .iter()
+            .map(|n| {
+                let start = text.find(n).unwrap();
+                Span {
+                    start,
+                    end: start + n.len(),
+                    text: n.to_string(),
+                    category: Category::OtherId,
+                    confidence: 0.95,
+                    source: Source::Model,
+                    detector: "test-model".into(),
+                    checksum: Checksum::None,
+                    note: None,
+                }
+            })
+            .collect();
+        let mut v = Vault::default();
+        let out = redact(text, &k, &[], &[], &model, &mut v).output;
+        let a = format!("[{}_1]", Category::OtherId.label());
+        let b = format!("[{}_2]", Category::OtherId.label());
+        assert_eq!(out, format!("Refs {a} and {b}."));
+        assert_eq!(restore(&out, &v), text);
     }
 }
