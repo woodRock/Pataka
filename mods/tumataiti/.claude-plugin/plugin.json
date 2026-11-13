@@ -1,6 +1,6 @@
 {
   "name": "tumataiti",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Pātaka's Tūmataiti redaction for Claude Code: names and personal details become placeholders before anything is stored or sent, and real values go back into tool calls on this computer.",
   "license": "Apache-2.0"
 }

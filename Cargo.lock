@@ -3443,6 +3443,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tumataiti-rules",
+ "unicode-normalization",
  "url",
  "uuid",
  "webpki-roots",

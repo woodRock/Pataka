@@ -94,35 +94,49 @@ pub struct Outcome {
 /// Lowercase, macrons removed, keeping a map from each folded char back to
 /// the byte range it came from in the original text.
 fn fold_char(c: char) -> char {
-    match c {
-        'ā' | 'Ā' => 'a',
-        'ē' | 'Ē' => 'e',
-        'ī' | 'Ī' => 'i',
-        'ō' | 'Ō' => 'o',
-        'ū' | 'Ū' => 'u',
-        c => c.to_lowercase().next().unwrap_or(c),
-    }
+    use unicode_normalization::UnicodeNormalization;
+    // The letter without its accents (`ā`, `é` → `a`, `e`), lowercased.
+    let base = std::iter::once(c).nfd().next().unwrap_or(c);
+    base.to_lowercase().next().unwrap_or(base)
+}
+
+/// A combining mark: an accent or macron written as its own character after
+/// the letter (decomposed text, as PDF tools often give). Folding ignores
+/// it, and a span never stops just before one.
+pub(crate) fn is_mark(c: char) -> bool {
+    unicode_normalization::char::is_combining_mark(c)
 }
 
 fn fold(s: &str) -> String {
-    s.chars().map(fold_char).collect()
+    s.chars().filter(|c| !is_mark(*c)).map(fold_char).collect()
 }
 
 /// Entity key: case, spacing, punctuation and macrons ignored, so `Hēmi` and
 /// `hemi` share a placeholder (as in Tūmataiti's own `entity_key`).
 fn entity_key(category: Category, text: &str) -> String {
-    let folded: String = text.chars().filter(|c| c.is_alphanumeric()).map(fold_char).collect();
+    let folded: String = text
+        .chars()
+        .filter(|c| c.is_alphanumeric() && !is_mark(*c))
+        .map(fold_char)
+        .collect();
     format!("{}|{}", category.label(), folded)
 }
 
 /// Every whole-word occurrence of `term` in `text`, ignoring case and macrons.
 /// Returns UTF-8 byte ranges into `text`.
 pub fn find_term(text: &str, term: &str) -> Vec<(usize, usize)> {
-    let needle: Vec<char> = term.trim().chars().map(fold_char).collect();
+    // Accents written as separate marks are skipped on both sides, so
+    // decomposed text matches; a match ends after any marks that follow it
+    // (the next letter's offset, or the end of the text).
+    let needle: Vec<char> = term.trim().chars().filter(|c| !is_mark(*c)).map(fold_char).collect();
     if needle.is_empty() {
         return Vec::new();
     }
-    let chars: Vec<(usize, char)> = text.char_indices().map(|(i, c)| (i, fold_char(c))).collect();
+    let chars: Vec<(usize, char)> = text
+        .char_indices()
+        .filter(|(_, c)| !is_mark(*c))
+        .map(|(i, c)| (i, fold_char(c)))
+        .collect();
     let mut out = Vec::new();
     let n = needle.len();
     let mut i = 0;
@@ -277,10 +291,180 @@ fn enclosing_word(text: &str, start: usize, end: usize) -> &str {
     text[s..e].trim_matches(':')
 }
 
+/// Words for kin and collectives (whānau, hapū, iwi, koro…) and the small
+/// words that join them. A span made only of these names no one: "te iwi"
+/// or "ngā hapū" is a kind of group, not a particular one.
+const COLLECTIVE_WORDS: [&str; 40] = [
+    "whanau",
+    "hapu",
+    "iwi",
+    "marae",
+    "waka",
+    "ropu",
+    "tupuna",
+    "tipuna",
+    "mokopuna",
+    "kaumatua",
+    "kuia",
+    "koro",
+    "koroua",
+    "nan",
+    "nana",
+    "papa",
+    "mama",
+    "whaea",
+    "matua",
+    "tamariki",
+    "rangatahi",
+    "rangatira",
+    "tangata",
+    "whenua",
+    "tuakana",
+    "teina",
+    "tuahine",
+    "tungane",
+    "whanaunga",
+    "uri",
+    "kaitiaki",
+    "taua",
+    "poua",
+    "pakeke",
+    "te",
+    "nga",
+    "o",
+    "a",
+    "me",
+    "ma",
+];
+const GLUE_WORDS: [&str; 6] = ["te", "nga", "o", "a", "me", "ma"];
+
+fn only_collective_words(s: &str) -> bool {
+    let words: Vec<String> = s
+        .split(|c: char| !c.is_alphabetic() && !is_mark(c))
+        .filter(|w| !w.is_empty())
+        .map(fold)
+        .collect();
+    !words.is_empty()
+        && words.iter().all(|w| COLLECTIVE_WORDS.contains(&w.as_str()))
+        && words.iter().any(|w| !GLUE_WORDS.contains(&w.as_str()))
+}
+
+/// The run of letters, digits and hyphens around `start..end`: a span over
+/// `DeBERTa` in `DeBERTa-v3-small` is judged by the whole model name.
+fn hyphen_token(text: &str, start: usize, end: usize) -> &str {
+    if start > end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return "";
+    }
+    let part = |c: char| c.is_alphanumeric() || is_mark(c) || matches!(c, '-' | '_' | '.');
+    let mut a = start;
+    while let Some(c) = text[..a].chars().next_back().filter(|c| part(*c)) {
+        a -= c.len_utf8();
+    }
+    let mut b = end;
+    while let Some(c) = text[b..].chars().next().filter(|c| part(*c)) {
+        b += c.len_utf8();
+    }
+    &text[a..b]
+}
+
+/// Read's output numbers every line (`    55\tText`). Those numbers run
+/// into the text and look like IDs, phone numbers or street numbers, so
+/// detection reads them as spaces. Same length, so offsets still hold.
+pub fn detection_view(text: &str) -> std::borrow::Cow<'_, str> {
+    static NUMBERED: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"(?m)^ *(\d+)(?:\t|→)").expect("pattern compiles"));
+    if NUMBERED.find_iter(text).take(2).count() < 2 {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = text.to_string();
+    for c in NUMBERED.captures_iter(text) {
+        let m = c.get(1).expect("group 1");
+        out.replace_range(m.range(), &" ".repeat(m.len()));
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Finish spans so they leave nothing behind: over the accents written after
+/// a letter, over the rest of a hyphenated name (`Rodriguez-Ruiz`, or the
+/// `-effe` a line break split off), and over the next line's part of a URL
+/// broken after `/`, `.` or `-`.
+fn shape_spans(text: &str, spans: &mut Vec<Span>) {
+    let url_char = |c: char| c.is_alphanumeric() || "-._~:/?#[]@!$&'*+,;=%".contains(c);
+    let mut changed = false;
+    for s in spans.iter_mut() {
+        let (start, mut end) = (s.start, s.end);
+        let mut start = start;
+        if s.category == Category::Person {
+            // The rest of a hyphenated name, on either side.
+            loop {
+                let rest = &text[end..];
+                let mut it = rest.char_indices();
+                match (it.next(), it.next()) {
+                    // `Mont-` then a line break then `effe`: one word, split.
+                    (Some((_, '-')), Some((_, '\n'))) if rest[2..].chars().next().is_some_and(char::is_lowercase) => {
+                        end += 2;
+                        while let Some(c) = text[end..].chars().next().filter(|c| c.is_alphabetic() || is_mark(*c)) {
+                            end += c.len_utf8();
+                        }
+                    }
+                    (Some((_, '-')), Some((_, c))) if c.is_alphabetic() => {
+                        end += 1;
+                        while let Some(c) = text[end..].chars().next().filter(|c| c.is_alphabetic() || is_mark(*c)) {
+                            end += c.len_utf8();
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            while text[..start].ends_with('-') && text[..start - 1].chars().next_back().is_some_and(char::is_alphabetic)
+            {
+                start -= 1;
+                while let Some(c) = text[..start]
+                    .chars()
+                    .next_back()
+                    .filter(|c| c.is_alphabetic() || is_mark(*c))
+                {
+                    start -= c.len_utf8();
+                }
+            }
+        }
+        if s.category == Category::Url && text[..end].ends_with(['/', '.', '-', '_', '=', '?', '&']) {
+            let rest = &text[end..];
+            let gap = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+            if rest[gap..].starts_with('\n') {
+                let next = &rest[gap + 1..];
+                let take: usize = next.chars().take_while(|c| url_char(*c)).map(char::len_utf8).sum();
+                if take > 0 {
+                    end += gap + 1 + take;
+                }
+            }
+        }
+        while let Some(c) = text[end..].chars().next().filter(|c| is_mark(*c)) {
+            end += c.len_utf8();
+        }
+        if (start, end) != (s.start, s.end) {
+            s.start = start;
+            s.end = end;
+            s.text = text[start..end].to_string();
+            changed = true;
+        }
+    }
+    if changed {
+        *spans = tumataiti_rules::merge(text, std::mem::take(spans));
+    }
+}
+
 /// Whether a model span is one to ignore: an "email" that is not an address,
 /// or any span that falls on a hex id or citation key.
 fn model_misfire(text: &str, s: &Span) -> bool {
-    (s.category == Category::Email && !looks_like_email(&s.text)) || record_key(enclosing_word(text, s.start, s.end))
+    let name_like = matches!(s.category, Category::Person | Category::Affiliation);
+    (s.category == Category::Email && !looks_like_email(&s.text))
+        || record_key(enclosing_word(text, s.start, s.end))
+        // A software or model name (`DeBERTa-v3-small`), not a person.
+        || (name_like && hyphen_token(text, s.start, s.end).chars().any(|c| c.is_ascii_digit()))
+        // "te iwi", "ngā hapū": a kind of group, not one. (A kinship word the
+        // model takes for a person is flagged by Tūmataiti's review instead.)
+        || (s.category == Category::Affiliation && only_collective_words(&s.text))
 }
 
 /// Clean the name model's spans before they are trusted: drop fragments that
@@ -619,6 +803,11 @@ pub fn redact(
     // it appears, even where no detector would find it this time (a model
     // reply that repeats a name, a name in a different sentence), but what is
     // detected now decides the label.
+    // Detection reads the text with Read's line numbers blanked; the output
+    // is built from the text as given. The two have the same offsets.
+    let output_text = text;
+    let view = detection_view(text);
+    let text: &str = &view;
     for name in crate::authors::bibliographic_names(text) {
         if !vault.public_names.contains(&name) {
             vault.public_names.push(name);
@@ -627,6 +816,7 @@ pub fn redact(
     let mut spans = detect(text, kaupapa, extra_terms, extra_allow, model);
     fill_known(text, kaupapa, extra_allow, vault, &mut spans);
     widen_emails(text, &mut spans);
+    shape_spans(text, &mut spans);
     // Authors a paper cites, and the paper's own byline: shown, hidden or
     // held until the person says, as the kaupapa sets.
     let mut cited = crate::authors::cited_names(text);
@@ -655,12 +845,27 @@ pub fn redact(
     // Authors a bibliography has listed are public, in whatever form they
     // are written. A typed list or a gazetteer entry still wins: those are
     // the person's own choices, so only detected names are let through.
+    // The model sometimes labels a cited name a place or a group (a first
+    // author at the start of a reference, an organisation), so every label
+    // a name can carry is checked.
     if !vault.public_names.is_empty() {
         spans.retain(|s| {
-            s.category != Category::Person
+            !matches!(s.category, Category::Person | Category::Address | Category::Affiliation)
                 || (s.source == Source::Gazetteer && s.detector != "known_value")
                 || !crate::authors::is_public(&s.text, &vault.public_names)
         });
+    }
+    // A reference list is public metadata: when cited authors are shown, what
+    // the model or the link rules find there (cities, publishers, title
+    // words, page ranges, DOIs) is too. Contact details and the person's own
+    // lists still apply.
+    if show_cited {
+        if let Some(refs) = crate::authors::references_start(text) {
+            spans.retain(|s| {
+                s.start < refs
+                    || !(s.source == Source::Model || s.category == Category::Url || s.detector == "known_value")
+            });
+        }
     }
     // Placeholders already in the text (in a model's reply) stay as they are.
     let issued: Vec<(usize, usize)> = vault
@@ -734,16 +939,16 @@ pub fn redact(
     let output = if blocked {
         String::new()
     } else {
-        let mut out = String::with_capacity(text.len());
+        let mut out = String::with_capacity(output_text.len());
         let mut cursor = 0;
         for f in &findings {
             if let Some(r) = &f.replacement {
-                out.push_str(&text[cursor..f.start]);
+                out.push_str(&output_text[cursor..f.start]);
                 out.push_str(r);
                 cursor = f.end;
             }
         }
-        out.push_str(&text[cursor..]);
+        out.push_str(&output_text[cursor..]);
         out
     };
     Outcome {
@@ -753,10 +958,28 @@ pub fn redact(
     }
 }
 
+static PLACEHOLDER_LIKE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"\[((?:literal )*[A-Z][A-Z_]*_\d+[A-Z]?)\]").expect("pattern compiles")
+});
+static ESCAPED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"\[literal ((?:literal )*[A-Z][A-Z_]*_\d+[A-Z]?)\]").expect("pattern compiles")
+});
+
+/// Mark text that already looks like a placeholder (a paper about
+/// redaction, a test file) so it cannot be taken for one of Pātaka's: a
+/// bracketed EMAIL_1 gains the word `literal` inside its brackets, and
+/// `restore` takes it off again. Use on text from the person or their
+/// files, never on the model's own words, whose placeholders are real.
+pub fn escape_literals(text: &str) -> std::borrow::Cow<'_, str> {
+    PLACEHOLDER_LIKE.replace_all(text, "[literal $1]")
+}
+
 /// Put original values back for display. Only placeholders this kōrero issued
-/// are replaced, so a response cannot inject values of its own.
+/// are replaced, so a response cannot inject values of its own. Escaped
+/// literals (`escape_literals`) become the text they were.
 pub fn restore(text: &str, vault: &Vault) -> String {
-    tumataiti_rules::restore(text, &vault.placeholders)
+    let restored = tumataiti_rules::restore(text, &vault.placeholders);
+    ESCAPED.replace_all(&restored, "[$1]").into_owned()
 }
 
 #[cfg(test)]
@@ -1438,5 +1661,161 @@ mod cited_author_tests {
         let out = redact(PAPER, &k, &[], &[], &spans(), &mut v).output;
         assert!(!out.contains("Sweeney"));
         assert_eq!(v.cited_question(), 0);
+    }
+}
+
+#[cfg(test)]
+mod paper_reading_tests {
+    use super::*;
+    use crate::model::CitedAuthors;
+
+    fn span(text: &str, needle: &str, category: Category) -> Span {
+        let start = text.find(needle).unwrap_or_else(|| panic!("{needle} not in text"));
+        Span {
+            start,
+            end: start + needle.len(),
+            text: needle.into(),
+            category,
+            confidence: 0.95,
+            source: Source::Model,
+            detector: "test-model".into(),
+            checksum: Checksum::None,
+            note: None,
+        }
+    }
+
+    fn run(text: &str, model: &[Span], k: &Kaupapa, v: &mut Vault) -> String {
+        redact(text, k, &[], &[], model, v).output
+    }
+
+    /// A placeholder-shaped token, built at run time.
+    fn token(label: &str, n: usize) -> String {
+        format!("[{label}_{n}]")
+    }
+
+    #[test]
+    fn placeholder_shaped_text_is_escaped_and_restored_as_written() {
+        let mut v = Vault::default();
+        let mine = run(
+            "Ask Aroha Kereama.",
+            &[span("Ask Aroha Kereama.", "Aroha Kereama", Category::Person)],
+            &Kaupapa::default(),
+            &mut v,
+        );
+        assert!(mine.contains(&token("PERSON", 1)));
+        // The paper writes the same token as an example.
+        let paper = format!("Names become {} and {}.", token("PERSON", 1), token("EMAIL", 1));
+        let escaped = escape_literals(&paper).into_owned();
+        assert!(!escaped.contains(&token("PERSON", 1)), "{escaped}");
+        let out = run(&escaped, &[], &Kaupapa::default(), &mut v);
+        assert_eq!(
+            restore(&out, &v),
+            paper,
+            "the paper's own token comes back, not the person's name"
+        );
+        // Escaping is undone exactly, even for text that was already escaped.
+        let twice = escape_literals(&escaped).into_owned();
+        assert_eq!(restore(&twice, &v), escaped);
+    }
+
+    #[test]
+    fn decomposed_accents_stay_inside_the_span_and_match_lists() {
+        let acute = '\u{301}';
+        let macron = '\u{304}';
+        let name = format!("Jose{acute} Pe{acute}rez");
+        // The model's span stops before the accent on the final letter.
+        let text = format!("Thanks to {name}{acute}.");
+        let model = [span(&text, &name, Category::Person)];
+        let mut v = Vault::default();
+        let out = run(&text, &model, &Kaupapa::default(), &mut v);
+        assert!(
+            !out.contains(acute),
+            "an accent was left outside the placeholder: {out:?}"
+        );
+        // A macron written as a mark still matches the allow-list and tapu terms.
+        let pataka = format!("Pa{macron}taka");
+        let text = format!("{pataka} hides names.");
+        let model = [span(&text, &pataka, Category::Person)];
+        let k = Kaupapa {
+            allow_list: vec!["Pātaka".into()],
+            ..Kaupapa::default()
+        };
+        assert_eq!(run(&text, &model, &k, &mut Vault::default()), text);
+        let k = Kaupapa {
+            tapu_terms: vec!["Pātaka".into()],
+            ..Kaupapa::default()
+        };
+        assert!(redact(&text, &k, &[], &[], &[], &mut Vault::default()).blocked);
+    }
+
+    #[test]
+    fn hyphenated_names_are_hidden_whole() {
+        let text = "Work by Ana Rodriguez-Ruiz and de Mont-\neffe.";
+        let model = [
+            span(text, "Ruiz", Category::Person),
+            span(text, "Mont", Category::Person),
+        ];
+        let out = run(text, &model, &Kaupapa::default(), &mut Vault::default());
+        assert!(!out.contains("Rodriguez") && !out.contains("Ruiz"), "{out}");
+        assert!(!out.contains("effe"), "{out}");
+    }
+
+    #[test]
+    fn a_wrapped_url_is_hidden_with_its_tail() {
+        let text = "See https://example.org/people/\naroha-kereama for more.";
+        let out = run(text, &[], &Kaupapa::default(), &mut Vault::default());
+        assert!(!out.contains("aroha"), "{out}");
+        assert!(out.ends_with(" for more."), "{out}");
+    }
+
+    #[test]
+    fn model_names_and_group_words_are_not_people_or_groups() {
+        let text = "We fine-tune DeBERTa-v3-small with te iwi.";
+        let model = [
+            span(text, "DeBERTa", Category::Person),
+            span(text, "te iwi", Category::Affiliation),
+        ];
+        assert_eq!(run(text, &model, &Kaupapa::default(), &mut Vault::default()), text);
+    }
+
+    #[test]
+    fn read_line_numbers_are_not_read_as_values() {
+        let text = "    55\tFirst line\n    56\tSecond line\n";
+        let view = detection_view(text);
+        assert_eq!(view.len(), text.len());
+        assert!(!view.contains("55") && view.contains("First line"));
+        assert_eq!(detection_view("Just 55 words."), "Just 55 words.");
+    }
+
+    #[test]
+    fn cited_names_are_shown_under_any_label_and_the_reference_list_is_left_alone() {
+        let k = Kaupapa {
+            cited_authors: CitedAuthors::Show,
+            ..Kaupapa::default()
+        };
+        let text = "Sovereignty matters (Te Mana Raraunga, 2018; Kereama, 2026), as de Montjoye et al. (2015) show.\n\nReferences\nKereama, A. (2026). Data in Florence. In Proc. ACL, Florence, pp. 4561–4570. https://doi.org/10.1/x\n";
+        let model = [
+            span(text, "Te Mana Raraunga", Category::Affiliation),
+            span(text, "Kereama, 2026", Category::Address),
+            span(text, "Montjoye", Category::Person),
+            span(text, "Florence, pp", Category::Address),
+            span(text, "4561", Category::OtherId),
+        ];
+        let mut model = model.to_vec();
+        // The "Kereama" span covers the name only.
+        model[1].end = model[1].start + "Kereama".len();
+        model[1].text = "Kereama".into();
+        model[3].end = model[3].start + "Florence".len();
+        model[3].text = "Florence".into();
+        let out = run(text, &model, &k, &mut Vault::default());
+        assert_eq!(out, text);
+        // Hidden, the same text keeps its placeholders.
+        let k = Kaupapa {
+            cited_authors: CitedAuthors::Hide,
+            ..Kaupapa::default()
+        };
+        let out = run(text, &model, &k, &mut Vault::default());
+        let body = out.split("References").next().unwrap_or_default();
+        assert!(!body.contains("Kereama") && !body.contains("Raraunga") && !body.contains("Montjoye"));
     }
 }

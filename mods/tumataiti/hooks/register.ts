@@ -43,7 +43,9 @@ const RESERVED = new Set(['tool', 'tool_use_id', 'agentId', 'requestMeta', 'cons
 /** Rows the model never reads, or that it wrote itself from placeholders. */
 const SKIP_DOORS = new Set(['response', 'compaction', 'notice'])
 /** A placeholder; forms of one person's name add a letter to the number. */
-const PLACEHOLDER = /\[[A-Z][A-Z_]*_\d+[A-Z]?\]/
+// `[literal …]` is text that only looked like a placeholder; restoring it
+// gives back what was written.
+const PLACEHOLDER = /\[(?:literal )*[A-Z][A-Z_]*_\d+[A-Z]?\]/
 
 /** `pataka run` puts placeholders back itself, as the command runs. */
 const PATAKA_RUN = /(?:^|[\s;&|(])pataka\s+run(?:\s|$)/
@@ -61,6 +63,7 @@ export const NOTE = [
   `Privacy note from Pātaka: text in square brackets such as ${eg('PERSON', '1')} or ${eg('EMAIL', '2')} is a placeholder for private information that stays on the user's computer.`,
   `Treat each placeholder as the real value and use it exactly as written; never guess what it stands for, and do not call the information missing.`,
   `Placeholders that share a number, such as ${eg('PERSON', '3')} and ${eg('PERSON', '3B')}, are different written forms of one name (a full name and a surname alone, say), so they very likely refer to the same person.`,
+  `Text such as ${'['}literal ${eg('PERSON', '1').slice(1)} is not a placeholder: it is text that already looked like one (in a paper about redaction, say), and it means exactly the bracketed text without the word literal. Copy it as it is; Pātaka turns it back into what was written.`,
   `Pātaka puts real values back into the arguments of tools on this computer before they run. When a shell command needs real values but Claude Code refuses it because a hook changed its input (as auto mode does), run it as \`pataka run -- <command> [arguments]\` instead: the command is checked as written, and Pātaka puts the real values into its arguments only as it runs. Its arguments go to the program directly, not through a shell, so use it for one program and its arguments, without pipes or redirection.`,
 ].join(' ')
 
