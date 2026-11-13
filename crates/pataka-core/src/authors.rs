@@ -91,7 +91,10 @@ pub fn compatible(a: &Name, b: &Name) -> bool {
     // `de Montjoye` and `Montjoye` are one family name, however the model
     // cut the span.
     let core = |f: &str| -> String {
-        f.split(' ').skip_while(|w| PARTICLES.contains(w)).collect::<Vec<_>>().join(" ")
+        f.split(' ')
+            .skip_while(|w| PARTICLES.contains(w))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
     if a.family != b.family && core(&a.family) != core(&b.family) {
         return false;
@@ -246,7 +249,8 @@ static REFERENCES_HEADING: LazyLock<Regex> = LazyLock::new(|| {
 pub fn references_start(text: &str) -> Option<usize> {
     REFERENCES_HEADING.find_iter(text).last().map(|m| m.end())
 }
-static LINE_NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^[ \t]*\d{1,5}(?:\t|→|[ \t]{2,}|[ \t](\p{Lu}))").expect("pattern compiles"));
+static LINE_NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^[ \t]*\d{1,5}(?:\t|→|[ \t]{2,}|[ \t](\p{Lu}))").expect("pattern compiles"));
 static ABSTRACT_HEADING: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?mi)^\s*(?:abstract|summary|tuhinga whakarāpopoto)\b[.:—-]?").expect("pattern compiles")
 });

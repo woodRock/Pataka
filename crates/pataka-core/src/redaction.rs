@@ -295,10 +295,46 @@ fn enclosing_word(text: &str, start: usize, end: usize) -> &str {
 /// words that join them. A span made only of these names no one: "te iwi"
 /// or "ngā hapū" is a kind of group, not a particular one.
 const COLLECTIVE_WORDS: [&str; 40] = [
-    "whanau", "hapu", "iwi", "marae", "waka", "ropu", "tupuna", "tipuna", "mokopuna", "kaumatua", "kuia", "koro",
-    "koroua", "nan", "nana", "papa", "mama", "whaea", "matua", "tamariki", "rangatahi", "rangatira", "tangata",
-    "whenua", "tuakana", "teina", "tuahine", "tungane", "whanaunga", "uri", "kaitiaki", "taua", "poua", "pakeke",
-    "te", "nga", "o", "a", "me", "ma",
+    "whanau",
+    "hapu",
+    "iwi",
+    "marae",
+    "waka",
+    "ropu",
+    "tupuna",
+    "tipuna",
+    "mokopuna",
+    "kaumatua",
+    "kuia",
+    "koro",
+    "koroua",
+    "nan",
+    "nana",
+    "papa",
+    "mama",
+    "whaea",
+    "matua",
+    "tamariki",
+    "rangatahi",
+    "rangatira",
+    "tangata",
+    "whenua",
+    "tuakana",
+    "teina",
+    "tuahine",
+    "tungane",
+    "whanaunga",
+    "uri",
+    "kaitiaki",
+    "taua",
+    "poua",
+    "pakeke",
+    "te",
+    "nga",
+    "o",
+    "a",
+    "me",
+    "ma",
 ];
 const GLUE_WORDS: [&str; 6] = ["te", "nga", "o", "a", "me", "ma"];
 
@@ -365,9 +401,7 @@ fn shape_spans(text: &str, spans: &mut Vec<Span>) {
                 let mut it = rest.char_indices();
                 match (it.next(), it.next()) {
                     // `Mont-` then a line break then `effe`: one word, split.
-                    (Some((_, '-')), Some((_, '\n')))
-                        if rest[2..].chars().next().is_some_and(char::is_lowercase) =>
-                    {
+                    (Some((_, '-')), Some((_, '\n'))) if rest[2..].chars().next().is_some_and(char::is_lowercase) => {
                         end += 2;
                         while let Some(c) = text[end..].chars().next().filter(|c| c.is_alphabetic() || is_mark(*c)) {
                             end += c.len_utf8();
@@ -382,11 +416,14 @@ fn shape_spans(text: &str, spans: &mut Vec<Span>) {
                     _ => break,
                 }
             }
-            while text[..start].ends_with('-')
-                && text[..start - 1].chars().next_back().is_some_and(char::is_alphabetic)
+            while text[..start].ends_with('-') && text[..start - 1].chars().next_back().is_some_and(char::is_alphabetic)
             {
                 start -= 1;
-                while let Some(c) = text[..start].chars().next_back().filter(|c| c.is_alphabetic() || is_mark(*c)) {
+                while let Some(c) = text[..start]
+                    .chars()
+                    .next_back()
+                    .filter(|c| c.is_alphabetic() || is_mark(*c))
+                {
                     start -= c.len_utf8();
                 }
             }
@@ -1659,14 +1696,23 @@ mod paper_reading_tests {
     #[test]
     fn placeholder_shaped_text_is_escaped_and_restored_as_written() {
         let mut v = Vault::default();
-        let mine = run("Ask Aroha Kereama.", &[span("Ask Aroha Kereama.", "Aroha Kereama", Category::Person)], &Kaupapa::default(), &mut v);
+        let mine = run(
+            "Ask Aroha Kereama.",
+            &[span("Ask Aroha Kereama.", "Aroha Kereama", Category::Person)],
+            &Kaupapa::default(),
+            &mut v,
+        );
         assert!(mine.contains(&token("PERSON", 1)));
         // The paper writes the same token as an example.
         let paper = format!("Names become {} and {}.", token("PERSON", 1), token("EMAIL", 1));
         let escaped = escape_literals(&paper).into_owned();
         assert!(!escaped.contains(&token("PERSON", 1)), "{escaped}");
         let out = run(&escaped, &[], &Kaupapa::default(), &mut v);
-        assert_eq!(restore(&out, &v), paper, "the paper's own token comes back, not the person's name");
+        assert_eq!(
+            restore(&out, &v),
+            paper,
+            "the paper's own token comes back, not the person's name"
+        );
         // Escaping is undone exactly, even for text that was already escaped.
         let twice = escape_literals(&escaped).into_owned();
         assert_eq!(restore(&twice, &v), escaped);
@@ -1682,7 +1728,10 @@ mod paper_reading_tests {
         let model = [span(&text, &name, Category::Person)];
         let mut v = Vault::default();
         let out = run(&text, &model, &Kaupapa::default(), &mut v);
-        assert!(!out.contains(acute), "an accent was left outside the placeholder: {out:?}");
+        assert!(
+            !out.contains(acute),
+            "an accent was left outside the placeholder: {out:?}"
+        );
         // A macron written as a mark still matches the allow-list and tapu terms.
         let pataka = format!("Pa{macron}taka");
         let text = format!("{pataka} hides names.");
@@ -1702,7 +1751,10 @@ mod paper_reading_tests {
     #[test]
     fn hyphenated_names_are_hidden_whole() {
         let text = "Work by Ana Rodriguez-Ruiz and de Mont-\neffe.";
-        let model = [span(text, "Ruiz", Category::Person), span(text, "Mont", Category::Person)];
+        let model = [
+            span(text, "Ruiz", Category::Person),
+            span(text, "Mont", Category::Person),
+        ];
         let out = run(text, &model, &Kaupapa::default(), &mut Vault::default());
         assert!(!out.contains("Rodriguez") && !out.contains("Ruiz"), "{out}");
         assert!(!out.contains("effe"), "{out}");
@@ -1719,7 +1771,10 @@ mod paper_reading_tests {
     #[test]
     fn model_names_and_group_words_are_not_people_or_groups() {
         let text = "We fine-tune DeBERTa-v3-small with te iwi.";
-        let model = [span(text, "DeBERTa", Category::Person), span(text, "te iwi", Category::Affiliation)];
+        let model = [
+            span(text, "DeBERTa", Category::Person),
+            span(text, "te iwi", Category::Affiliation),
+        ];
         assert_eq!(run(text, &model, &Kaupapa::default(), &mut Vault::default()), text);
     }
 

@@ -223,7 +223,11 @@ impl Redactor<'_> {
             return s.to_string();
         }
         self.stats.texts += 1;
-        let escaped = if self.escape { redaction::escape_literals(s) } else { std::borrow::Cow::Borrowed(s) };
+        let escaped = if self.escape {
+            redaction::escape_literals(s)
+        } else {
+            std::borrow::Cow::Borrowed(s)
+        };
         let s: &str = &escaped;
         // The name model reads prose. In code and paths it mistakes segments
         // for names and URLs, which would break paths the agent needs, so its
