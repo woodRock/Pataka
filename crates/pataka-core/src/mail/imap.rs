@@ -575,6 +575,13 @@ impl Fetched {
             .map(|l| l.list().iter().filter_map(|t| t.text()).collect())
             .unwrap_or_default()
     }
+    /// The bytes of one fetched section, e.g. `BODY[2]`.
+    pub fn section(&self, item: &str) -> Option<&[u8]> {
+        match self.get(item)? {
+            Tok::Str(b) => Some(b),
+            _ => None,
+        }
+    }
     pub fn body(&self) -> Option<&[u8]> {
         match self.get("BODY[]")? {
             Tok::Str(b) => Some(b),

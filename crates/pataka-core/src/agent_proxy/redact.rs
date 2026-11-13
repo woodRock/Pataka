@@ -70,6 +70,13 @@ pub fn agent_kaupapa(k: &Kaupapa) -> Kaupapa {
         if *action == Action::Block && *cat != Category::CulturalRestricted {
             *action = Action::Mask;
         }
+        // An ID the model finds (one with no valid check digits) gets its own
+        // placeholder rather than one shared `[ID]`: the agent can tell two
+        // apart, and a placeholder it types into a local command is restored
+        // to the real value, which `[ID]` never could be.
+        if *cat == Category::OtherId && *action == Action::Mask {
+            *action = Action::Pseudonymise;
+        }
     }
     k
 }
@@ -77,6 +84,11 @@ pub fn agent_kaupapa(k: &Kaupapa) -> Kaupapa {
 /// Is `start..end` part of a whitespace-delimited token that looks like code
 /// or a path rather than prose?
 pub fn in_code_token(text: &str, start: usize, end: usize) -> bool {
+    // A span that does not fall on characters is never sliced (slicing it
+    // would panic); treat it as code, so it is left alone.
+    if start > end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return true;
+    }
     // Whitespace can be more than one byte (a non-breaking space in an
     // email), so step over the whole character, not one byte.
     let ts = text[..start]
@@ -85,9 +97,6 @@ pub fn in_code_token(text: &str, start: usize, end: usize) -> bool {
         .find(|(_, c)| c.is_whitespace())
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
-    if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
-        return true;
-    }
     let token_end = text[end..]
         .find(char::is_whitespace)
         .map(|i| end + i)
@@ -393,7 +402,7 @@ pub(crate) fn document_text(b: &Value) -> std::result::Result<Option<String>, St
 
 /// Tells the model how to work with placeholders, so it uses them instead of
 /// refusing or guessing.
-pub const PLACEHOLDER_NOTE: &str = "Privacy note from Pātaka: text in square brackets such as [PERSON_1], [EMAIL_2] or [ADDRESS_1] is a placeholder for private information that never leaves the user's computer. Pātaka puts the real value back on the user's computer, including in your tool calls (file paths, file contents, commands), before they run. Treat each placeholder as the real value: use it exactly as written wherever the value is needed, for example write [PERSON_1] into a file to write that person's name. Do not say the information is redacted or missing, and never guess what a placeholder stands for. A placeholder covers the whole value, so parts of it (such as a first name) are not available separately.";
+pub const PLACEHOLDER_NOTE: &str = "Privacy note from Pātaka: text in square brackets such as [PERSON_1], [EMAIL_2] or [ADDRESS_1] is a placeholder for private information that never leaves the user's computer. Pātaka puts the real value back on the user's computer, including in your tool calls (file paths, file contents, commands), before they run. Treat each placeholder as the real value: use it exactly as written wherever the value is needed, for example write [PERSON_1] into a file to write that person's name. Do not say the information is redacted or missing, and never guess what a placeholder stands for. A placeholder covers the whole value, so parts of it (such as a first name) are not available separately. Placeholders that share a number, such as [PERSON_3] and [PERSON_3B], are different written forms of one name (a full name and a surname alone, say), so they very likely refer to the same person. If a shell command that needs real values is refused because a hook changed its input, run it as `pataka run -- <command> [arguments]`: Pātaka puts the real values into its arguments only as it runs, and passes them to the program directly, not through a shell.";
 
 fn add_note(system: &mut Value) {
     match system {
@@ -892,6 +901,17 @@ mod tests {
 mod code_token_tests {
     use super::in_code_token;
 
+    #[test]
+    fn a_span_inside_a_wide_character_does_not_panic() {
+        // A non-breaking space is two bytes; a span starting or ending in
+        // the middle of it is left alone rather than sliced.
+        let t = "Dilated\u{a0}convolutions widen the field";
+        let mid = t.find('\u{a0}').unwrap() + 1;
+        assert!(in_code_token(t, mid, mid + 3));
+        assert!(in_code_token(t, 0, mid));
+        assert!(in_code_token(t, 5, 2));
+    }
+
     fn check(text: &str, needle: &str) -> bool {
         let start = text.find(needle).unwrap();
         in_code_token(text, start, start + needle.len())
@@ -917,5 +937,42 @@ mod code_token_tests {
     fn a_name_before_an_outlook_link_is_prose() {
         assert!(!check("Homepage Aroha<https://example.org/a_b>", "Aroha"));
         assert!(check("<https://example.org/Aroha>", "Aroha"));
+    }
+}
+
+#[cfg(test)]
+mod agent_id_tests {
+    use super::agent_kaupapa;
+    use crate::model::Kaupapa;
+    use crate::redaction::{redact, restore, Vault};
+    use tumataiti_rules::{Category, Checksum, Source, Span};
+
+    #[test]
+    fn each_model_id_gets_its_own_placeholder_that_restores() {
+        let k = agent_kaupapa(&Kaupapa::default());
+        let text = "Refs XK-99812 and XK-99813.";
+        let model: Vec<Span> = ["XK-99812", "XK-99813"]
+            .iter()
+            .map(|n| {
+                let start = text.find(n).unwrap();
+                Span {
+                    start,
+                    end: start + n.len(),
+                    text: n.to_string(),
+                    category: Category::OtherId,
+                    confidence: 0.95,
+                    source: Source::Model,
+                    detector: "test-model".into(),
+                    checksum: Checksum::None,
+                    note: None,
+                }
+            })
+            .collect();
+        let mut v = Vault::default();
+        let out = redact(text, &k, &[], &[], &model, &mut v).output;
+        let a = format!("[{}_1]", Category::OtherId.label());
+        let b = format!("[{}_2]", Category::OtherId.label());
+        assert_eq!(out, format!("Refs {a} and {b}."));
+        assert_eq!(restore(&out, &v), text);
     }
 }

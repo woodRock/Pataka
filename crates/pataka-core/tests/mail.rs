@@ -953,3 +953,85 @@ async fn threads_drafts_and_nested_labels() {
     m.close().await;
     assert!(unread(13), "no tool marked the boss's message as read");
 }
+
+#[tokio::test]
+async fn attachments_read_in_the_background_and_from_the_cache() {
+    use base64::Engine;
+    use pataka_core::mail::ops::{read_attachment, MsgId};
+    use std::time::Duration;
+    let pdf = pataka_core::pdf::sample(&[
+        "The method uses dilated convolutions throughout.",
+        "Results on the fish species dataset are strong.",
+    ]);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&pdf);
+    let wrapped: String = b64
+        .as_bytes()
+        .chunks(76)
+        .map(|c| format!("{}\r\n", std::str::from_utf8(c).unwrap()))
+        .collect();
+    let part = |ty: &str, name: &str, data: &str| {
+        format!("--b\r\nContent-Type: {ty}; name=\"{name}\"\r\nContent-Disposition: attachment; filename=\"{name}\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{data}")
+    };
+    let raw = format!(
+        "From: Supervisor <sup@example.org>\r\nTo: me@example.org\r\nSubject: Draft\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nThe draft is attached.\r\n{}{}--b--\r\n",
+        part("application/pdf", "Paper.pdf", &wrapped),
+        part("image/png", "figure.png", "iVBORw0KGgo=\r\n"),
+    );
+    let imap = fake();
+    imap.lock().unwrap().msgs.push(Msg {
+        uid: 21,
+        msgid: 0x6001,
+        thrid: 0x6001,
+        labels: vec!["\\Inbox".into()],
+        flags: vec![],
+        trash: false,
+        raw: raw.into_bytes(),
+    });
+    let port = serve_imap(imap.clone()).await;
+    let account = Account {
+        email: "me@example.org".into(),
+        password: PASSWORD.to_string().into(),
+        host: "127.0.0.1".into(),
+        port,
+        tls: false,
+    };
+    let id = MsgId::Gmail { msgid: 0x6001, uid: 21 }.to_string();
+    let logins = || {
+        imap.lock()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|c| c.to_uppercase().contains(" LOGIN "))
+            .count()
+    };
+    let wait = Duration::from_secs(20);
+
+    // No time to wait: the download goes on, and the answer says to ask again.
+    let t = read_attachment(&account, &id, "Paper.pdf", None, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(t.starts_with("Still downloading Paper.pdf"), "{t}");
+    // Asking again picks up the same download rather than starting another.
+    let t = read_attachment(&account, &id, "Paper.pdf", Some("2"), wait)
+        .await
+        .unwrap();
+    assert!(t.contains("fish species") && !t.contains("dilated"), "{t}");
+    assert_eq!(logins(), 1);
+    // More pages come from what was read, without connecting again.
+    let t = read_attachment(&account, &id, "paper.pdf", Some("1"), wait)
+        .await
+        .unwrap();
+    assert!(t.contains("dilated convolutions") && t.contains("2 page(s)"), "{t}");
+    assert_eq!(logins(), 1);
+    // Not a PDF: refused with the reason, and nothing of it is sent.
+    let e = read_attachment(&account, &id, "figure.png", None, wait)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("is an image"), "{e}");
+    let e = read_attachment(&account, &id, "minutes.pdf", None, wait)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("Paper.pdf, figure.png"), "{e}");
+}

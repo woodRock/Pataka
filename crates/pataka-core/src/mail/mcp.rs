@@ -128,6 +128,18 @@ pub async fn call(ctx: &McpContext, name: &str, args: &Value) -> Result<String> 
         return Err(Error::Invalid(format!("Unknown tool {name}.")));
     }
     let account = ctx.vault.account()?;
+    // Attachments are read in the background, and answered from what was
+    // read before without connecting.
+    if name == "attachment" {
+        return super::ops::read_attachment(
+            &account,
+            args["id"].as_str().unwrap_or(""),
+            args["name"].as_str().unwrap_or(""),
+            args["pages"].as_str(),
+            super::ops::ATTACHMENT_WAIT,
+        )
+        .await;
+    }
     let mut m = Mailer::connect(&account).await?;
     let result = run(&mut m, ctx, &account.email, name, args).await;
     m.close().await;

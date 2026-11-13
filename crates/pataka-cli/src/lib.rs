@@ -78,6 +78,15 @@ enum Cmd {
     /// Called by Claude Code hooks.
     #[command(hide = true)]
     Hook { which: String },
+    /// Run a command with Pātaka's placeholders in its arguments put back to
+    /// the real values, inside a Claude Code session run through Pātaka. The
+    /// command is checked as written, with placeholders; only the process
+    /// that runs sees the real values.
+    #[command(disable_help_flag = true)]
+    Run {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -246,6 +255,7 @@ pub fn run() -> i32 {
             "pretool" => hooks::hook_pretool(),
             _ => Ok(0),
         },
+        Cmd::Run { command } => hooks::run(command),
     };
     match result {
         Ok(code) => code,
