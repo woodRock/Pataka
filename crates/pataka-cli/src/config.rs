@@ -54,6 +54,10 @@ pub fn lists_show() -> Result<i32> {
     show("Health", by(Category::Health));
     show("Tapu terms (block the request)", k.tapu_terms.clone());
     show("Allowed unchanged", k.allow_list.clone());
+    println!(
+        "Authors a paper names: {} (change with `pataka lists cited-authors show|hide|ask`)",
+        k.cited_authors.as_str()
+    );
     Ok(0)
 }
 
@@ -87,6 +91,22 @@ pub fn lists_add(kind: ListKind, term: &str) -> Result<i32> {
         }
     })?;
     println!("Added “{term}”. It applies in the app and the terminal straight away.");
+    Ok(0)
+}
+
+/// `pataka lists cited-authors <show|hide|ask>`
+pub fn cited_authors(choice: &str) -> Result<i32> {
+    let Some(c) = pataka_core::model::CitedAuthors::parse(choice) else {
+        return Err(Error::Invalid("Choose show, hide or ask.".into()));
+    };
+    let ctx = Ctx::open()?;
+    ctx.update_settings(|s| s.kaupapa.cited_authors = c)?;
+    let what = match c {
+        pataka_core::model::CitedAuthors::Show => "The authors a paper names (byline, references, citations) now go to the model.",
+        pataka_core::model::CitedAuthors::Hide => "The authors a paper names are now hidden like any other name.",
+        pataka_core::model::CitedAuthors::Ask => "Pātaka will ask, once while it runs, before showing the authors a paper names.",
+    };
+    println!("{what} It applies straight away.");
     Ok(0)
 }
 

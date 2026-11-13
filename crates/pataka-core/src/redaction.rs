@@ -31,6 +31,38 @@ pub struct Vault {
     /// a name is never public for longer than the work that showed it.
     #[serde(skip)]
     pub public_names: Vec<String>,
+    /// The person's answer, while the service runs, to whether the authors
+    /// a paper cites may go to the model (asked when the kaupapa says ask).
+    #[serde(skip)]
+    pub cited_answer: Option<bool>,
+    /// Cited authors kept hidden until that question is answered.
+    #[serde(skip)]
+    pub cited_pending: Vec<String>,
+}
+
+impl Vault {
+    /// Record the person's answer about cited authors: shown, the ones held
+    /// back so far become public.
+    pub fn answer_cited(&mut self, show: bool) {
+        self.cited_answer = Some(show);
+        let pending = std::mem::take(&mut self.cited_pending);
+        if show {
+            for n in pending {
+                if !self.public_names.contains(&n) {
+                    self.public_names.push(n);
+                }
+            }
+        }
+    }
+
+    /// Whether cited authors are waiting on the person's answer.
+    pub fn cited_question(&self) -> usize {
+        if self.cited_answer.is_none() {
+            self.cited_pending.len()
+        } else {
+            0
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -595,6 +627,31 @@ pub fn redact(
     let mut spans = detect(text, kaupapa, extra_terms, extra_allow, model);
     fill_known(text, kaupapa, extra_allow, vault, &mut spans);
     widen_emails(text, &mut spans);
+    // Authors a paper cites, and the paper's own byline: shown, hidden or
+    // held until the person says, as the kaupapa sets.
+    let mut cited = crate::authors::cited_names(text);
+    if let Some(end) = crate::authors::byline_end(text) {
+        for s in spans.iter().filter(|s| s.category == Category::Person && s.end <= end) {
+            if s.source != Source::Gazetteer || s.detector == "known_value" {
+                cited.push(s.text.clone());
+            }
+        }
+    }
+    let show_cited = match kaupapa.cited_authors {
+        crate::model::CitedAuthors::Show => true,
+        crate::model::CitedAuthors::Hide => false,
+        crate::model::CitedAuthors::Ask => vault.cited_answer == Some(true),
+    };
+    let ask = kaupapa.cited_authors == crate::model::CitedAuthors::Ask && vault.cited_answer.is_none();
+    for name in cited {
+        if show_cited {
+            if !vault.public_names.contains(&name) {
+                vault.public_names.push(name);
+            }
+        } else if ask && !vault.cited_pending.contains(&name) {
+            vault.cited_pending.push(name);
+        }
+    }
     // Authors a bibliography has listed are public, in whatever form they
     // are written. A typed list or a gazetteer entry still wins: those are
     // the person's own choices, so only detected names are let through.
@@ -1280,5 +1337,79 @@ mod name_form_tests {
         assert_eq!(person_number(&ph(12, "C")), Some(12));
         assert_eq!(person_number("[EMAIL_3]"), None);
         assert_eq!(person_number(&format!("[{}_7BB]", Category::Person.label())), None);
+    }
+}
+
+#[cfg(test)]
+mod cited_author_tests {
+    use super::*;
+    use crate::model::CitedAuthors;
+
+    fn person(text: &str, needle: &str) -> Span {
+        let start = text.find(needle).unwrap();
+        Span {
+            start,
+            end: start + needle.len(),
+            text: needle.into(),
+            category: Category::Person,
+            confidence: 0.95,
+            source: Source::Model,
+            detector: "test-model".into(),
+            checksum: Checksum::None,
+            note: None,
+        }
+    }
+
+    fn kaupapa(c: CitedAuthors) -> Kaupapa {
+        Kaupapa {
+            cited_authors: c,
+            ..Kaupapa::default()
+        }
+    }
+
+    const PAPER: &str = "Re-identification\nAroha Kereama\nTe Herenga Waka\n\nAbstract\nAs Sweeney (2002) showed, and we thank Mere Tipene.\n\nReferences\nSweeney, L. (2002). k-Anonymity. IJUFKS.\n";
+
+    fn spans() -> Vec<Span> {
+        ["Aroha Kereama", "Sweeney", "Mere Tipene", "Sweeney, L."]
+            .iter()
+            .map(|n| person(PAPER, n))
+            .collect()
+    }
+
+    #[test]
+    fn shown_cited_authors_and_the_byline_go_through_but_thanked_people_do_not() {
+        let mut v = Vault::default();
+        let out = redact(PAPER, &kaupapa(CitedAuthors::Show), &[], &[], &spans(), &mut v).output;
+        assert!(out.contains("Aroha Kereama") && out.contains("Sweeney (2002)"), "{out}");
+        assert!(!out.contains("Tipene"), "acknowledged, not cited: {out}");
+    }
+
+    #[test]
+    fn hidden_cited_authors_stay_placeholders_and_nothing_is_pending() {
+        let mut v = Vault::default();
+        let out = redact(PAPER, &kaupapa(CitedAuthors::Hide), &[], &[], &spans(), &mut v).output;
+        assert!(!out.contains("Sweeney") && !out.contains("Kereama"), "{out}");
+        assert_eq!(v.cited_question(), 0);
+    }
+
+    #[test]
+    fn ask_holds_them_back_until_answered() {
+        let k = kaupapa(CitedAuthors::Ask);
+        let mut v = Vault::default();
+        let out = redact(PAPER, &k, &[], &[], &spans(), &mut v).output;
+        assert!(!out.contains("Sweeney"), "{out}");
+        assert!(v.cited_question() > 0);
+        v.answer_cited(true);
+        assert_eq!(v.cited_question(), 0);
+        let out = redact(PAPER, &k, &[], &[], &spans(), &mut v).output;
+        assert!(out.contains("Aroha Kereama") && out.contains("Sweeney (2002)"), "{out}");
+        assert!(!out.contains("Tipene"), "{out}");
+        // A "no" is kept too: hidden, and no question.
+        let mut v = Vault::default();
+        redact(PAPER, &k, &[], &[], &spans(), &mut v);
+        v.answer_cited(false);
+        let out = redact(PAPER, &k, &[], &[], &spans(), &mut v).output;
+        assert!(!out.contains("Sweeney"));
+        assert_eq!(v.cited_question(), 0);
     }
 }

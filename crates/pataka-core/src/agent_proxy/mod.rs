@@ -425,12 +425,18 @@ async fn control(st: &ProxyState, session: &Session, method: &Method, action: &s
                 .map(|a| a.iter().map(|t| t.as_str().unwrap_or_default().to_string()).collect())
                 .unwrap_or_default();
             let host = st.host.clone();
+            let vault = session.vault.clone();
             let session = session.clone();
             match tokio::task::spawn_blocking(move || redact_texts(host.as_ref(), &session, &texts)).await {
-                Ok(Ok((texts, stats, tapu))) => json_response(
-                    StatusCode::OK,
-                    serde_json::json!({"texts": texts, "categories": stats.categories, "tapu": tapu}),
-                ),
+                Ok(Ok((texts, stats, tapu))) => {
+                    // Cited authors held back until the person answers (the
+                    // mod asks, then sends the texts again).
+                    let cited = vault.lock().unwrap_or_else(|p| p.into_inner()).cited_question();
+                    json_response(
+                        StatusCode::OK,
+                        serde_json::json!({"texts": texts, "categories": stats.categories, "tapu": tapu, "citedAuthors": cited}),
+                    )
+                }
                 Ok(Err(e)) => json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": e.to_string()})),
                 Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Pātaka could not check this text."),
             }
@@ -452,6 +458,26 @@ async fn control(st: &ProxyState, session: &Session, method: &Method, action: &s
                 Ok(Err(why)) => json_response(StatusCode::UNPROCESSABLE_ENTITY, serde_json::json!({"error": why})),
                 Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Pātaka could not read this PDF."),
             }
+        }
+        // The person's answer to whether cited authors may go to the model,
+        // kept while the service runs: {"show": true|false}.
+        (Method::POST, "cited-authors") => {
+            let Some(show) = serde_json::from_slice::<Value>(body).ok().and_then(|v| v["show"].as_bool()) else {
+                return error(StatusCode::BAD_REQUEST, "Pātaka could not read this request.");
+            };
+            if st.host.status()["locked"] == true {
+                return json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": "Pātaka is locked."}));
+            }
+            session.vault.lock().unwrap_or_else(|p| p.into_inner()).answer_cited(show);
+            let _ = audit::append(
+                &st.host.audit_path(),
+                audit::Entry {
+                    event: if show { "cited-authors-shown" } else { "cited-authors-hidden" }.into(),
+                    korero: Some(session.korero.clone()),
+                    ..Default::default()
+                },
+            );
+            json_response(StatusCode::OK, serde_json::json!({"show": show}))
         }
         (Method::POST, "restore") => {
             let Ok(mut v) = serde_json::from_slice::<Value>(body) else {

@@ -198,12 +198,126 @@ pub fn bibliographic_names(text: &str) -> Vec<String> {
     out
 }
 
-/// Whether `written` names one of the `public` authors.
+/// Whether `written` names one of the `public` authors. A public surname
+/// with no given names (from an in-text citation, "Sweeney (2002)") covers
+/// only the surname written alone: it does not make every Sweeney public.
 pub fn is_public(written: &str, public: &[String]) -> bool {
     let Some(name) = parse(written) else {
         return false;
     };
-    public.iter().filter_map(|p| parse(p)).any(|p| compatible(&p, &name))
+    public
+        .iter()
+        .filter_map(|p| parse(p))
+        .any(|p| (!p.given.is_empty() || name.given.is_empty()) && compatible(&p, &name))
+}
+
+/// A surname as papers write it: capitalised, perhaps with a particle
+/// (`de Montjoye`), a hyphen or an apostrophe.
+const SURNAME: &str = r"(?:(?:de|van|von|der|di|da|du|le)\s)?\p{Lu}[\p{L}'’-]+";
+/// A year in a citation: 1600 to 2099, perhaps with a letter (`2019a`).
+const YEAR: &str = r"(?:1[6-9]|20)\d{2}[a-z]?";
+
+/// Words that sit where a cited surname would but are not one.
+const NOT_SURNAMES: [&str; 24] = [
+    "act", "and", "appendix", "chapter", "eq", "equation", "fig", "figure", "in", "january", "june", "july",
+    "march", "may", "note", "part", "section", "see", "since", "table", "the", "version", "volume", "year",
+];
+
+static PAREN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(([^()]{4,400})\)").expect("pattern compiles"));
+static PAREN_PART: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"^\s*(?:(?:see|e\.g\.|cf\.|i\.e\.)[,\s]+)*((?:{SURNAME})(?:(?:,\s*|\s+(?:and|&)\s+)(?:{SURNAME}))*(?:,?\s+et\s+al\.?)?),?\s+{YEAR}(?:,\s*(?:p|pp|ch)\.?\s*[\d–-]+)?\s*$"
+    ))
+    .expect("pattern compiles")
+});
+static NARRATIVE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"((?:{SURNAME})(?:(?:,\s*|\s+(?:and|&)\s+)(?:{SURNAME}))*)(?:\s+et\s+al\.?)?\s+(?:\({YEAR}\)|\[\d+(?:[,–-]\s*\d+)*\])"
+    ))
+    .expect("pattern compiles")
+});
+static REFERENCES_HEADING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?mi)^\s*(?:\d+\.?\s*|[ivx]+\.\s*)?(?:references|bibliography|works cited|literature cited|reference list|ngā tohutoro)\s*$")
+        .expect("pattern compiles")
+});
+static ABSTRACT_HEADING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?mi)^\s*(?:abstract|summary|tuhinga whakarāpopoto)\b[.:—-]?").expect("pattern compiles"));
+static SURNAME_INITIALS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"({SURNAME}(?:\s\p{{Lu}}[\p{{L}}'’-]+)?),\s((?:\p{{Lu}}\.(?:\s?-?\s?\p{{Lu}}\.)*\s?){{1,4}})"))
+        .expect("pattern compiles")
+});
+static INITIALS_SURNAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"(?:^|[\s,\]])((?:\p{{Lu}}\.\s?-?){{1,4}})\s?({SURNAME})"))
+        .expect("pattern compiles")
+});
+static FULL_NAME_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r#"(?m)^\s*(?:\[\d+\]\s*)?([^.\[\]\n“"]{{3,300}}?)(?:\.\s+{YEAR}\.|,\s*[“"])"#)).expect("pattern compiles")
+});
+static FULL_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\p{Lu}[\p{L}'’.-]*(?:\s+(?:(?:de|van|von|der|di|da|du|le)\s+)?\p{Lu}[\p{L}'’.-]*){1,3}$").expect("pattern compiles"));
+
+/// Surnames in a list of cited names: `Rocher, Hendrickx and de Montjoye et al.`.
+fn split_surnames(names: &str) -> Vec<String> {
+    let cut = names.trim().trim_end_matches('.');
+    let cut = cut.strip_suffix("et al").unwrap_or(cut);
+    AND.split(cut)
+        .flat_map(|p| p.split([',', '&']))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty() && !NOT_SURNAMES.contains(&fold(p).as_str()))
+        .collect()
+}
+
+/// Where a paper's byline ends: the start of an Abstract heading near the
+/// top. Names before it are the paper's authors. `None` when the text does
+/// not open like a paper.
+pub fn byline_end(text: &str) -> Option<usize> {
+    let head = &text[..text.len().min(3000)];
+    let head = &head[..(0..=head.len()).rev().find(|&i| head.is_char_boundary(i)).unwrap_or(0)];
+    ABSTRACT_HEADING.find(head).map(|m| m.start()).filter(|&i| i > 0)
+}
+
+/// Names `text` cites as authors of published work: in a reference list
+/// (after a References heading) every author of every entry, and anywhere
+/// the surnames of an in-text citation, which come with a year or a
+/// reference number (`(Sweeney, 2002)`, `Rocher et al. [12]`). Names in
+/// prose, acknowledgements or quotes are not citations and are not found.
+pub fn cited_names(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |name: String| {
+        let n = name.trim().trim_end_matches(',').trim().to_string();
+        if parse(&n).is_some() && !NOT_SURNAMES.contains(&fold(&n).as_str()) && !out.contains(&n) {
+            out.push(n);
+        }
+    };
+    for m in PAREN.captures_iter(text) {
+        for part in m[1].split(';') {
+            if let Some(c) = PAREN_PART.captures(part) {
+                split_surnames(&c[1]).into_iter().for_each(&mut push);
+            }
+        }
+    }
+    for c in NARRATIVE.captures_iter(text) {
+        split_surnames(&c[1]).into_iter().for_each(&mut push);
+    }
+    if let Some(h) = REFERENCES_HEADING.find_iter(text).last() {
+        let refs = &text[h.end()..];
+        let joined = refs.replace('\n', " ");
+        for c in SURNAME_INITIALS.captures_iter(&joined) {
+            push(format!("{}, {}", &c[1], c[2].trim()));
+        }
+        for c in INITIALS_SURNAME.captures_iter(&joined) {
+            push(format!("{} {}", c[1].trim(), &c[2]));
+        }
+        for c in FULL_NAME_BLOCK.captures_iter(refs) {
+            for piece in AND.split(&c[1]).flat_map(|p| p.split(',')) {
+                let piece = piece.trim();
+                if FULL_NAME.is_match(piece) {
+                    push(piece.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -241,6 +355,49 @@ mod tests {
         assert_eq!(bibliographic_names(block), ["Ana Smith", "Bo Li"]);
         // Prose that mentions authors is not a list of them.
         assert!(bibliographic_names("The authors thank Ana Smith.").is_empty());
+    }
+
+    #[test]
+    fn in_text_citations_give_surnames_only() {
+        let text = "Quasi-identifiers re-identify people (Sweeney, 2002; Rocher et al., 2019). \
+            As Narayanan and Shmatikov (2008) showed, and Ohm [7] argued, de Montjoye et al. [3, 4] agree. \
+            See Table 2 (2019). We thank Aroha Kereama (pers. comm.) for comments.";
+        let names = cited_names(text);
+        for n in ["Sweeney", "Rocher", "Narayanan", "Shmatikov", "Ohm", "de Montjoye"] {
+            assert!(names.iter().any(|x| x == n), "{n} missing from {names:?}");
+        }
+        assert!(!names.iter().any(|x| x.contains("Kereama") || x == "Table"), "{names:?}");
+    }
+
+    #[test]
+    fn reference_lists_give_whole_names() {
+        let text = "Body text by Mere Tipene.\n\nReferences\n\
+            Sweeney, L. (2002). k-Anonymity: A model for protecting privacy. IJUFKS, 10(5).\n\
+            [12] L. Rocher, J. M. Hendrickx, and Y.-A. de Montjoye, “Estimating the success of re-identifications,” Nat. Commun., 2019.\n\
+            Arvind Narayanan and Vitaly Shmatikov. 2008. Robust de-anonymization of large sparse datasets. In S&P.\n";
+        let names = cited_names(text);
+        for n in ["Sweeney, L.", "L. Rocher", "J. M. Hendrickx", "Y.-A. de Montjoye", "Arvind Narayanan", "Vitaly Shmatikov"] {
+            assert!(names.iter().any(|x| x == n), "{n} missing from {names:?}");
+        }
+        assert!(!names.iter().any(|x| x.contains("Tipene")), "prose before the references: {names:?}");
+    }
+
+    #[test]
+    fn a_cited_surname_alone_covers_only_the_surname() {
+        let public = vec!["Sweeney".to_string()];
+        assert!(is_public("Sweeney", &public));
+        assert!(!is_public("Aroha Sweeney", &public));
+        let public = vec!["Sweeney, L.".to_string()];
+        assert!(is_public("Latanya Sweeney", &public));
+        assert!(is_public("Sweeney", &public));
+    }
+
+    #[test]
+    fn the_byline_ends_at_the_abstract() {
+        let paper = "k-Anonymity\nLatanya Sweeney\nSchool of Computer Science\n\nAbstract\nConsider a data holder…";
+        let end = byline_end(paper).unwrap();
+        assert!(paper[..end].contains("Latanya"));
+        assert!(byline_end("Kia ora,\nHe pātai tāku.").is_none());
     }
 
     #[test]

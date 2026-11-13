@@ -126,6 +126,9 @@ enum ListsCmd {
     AddAllow { term: String },
     /// Remove a term from every list.
     Remove { term: String },
+    /// Whether the authors a paper names in its byline, references and
+    /// citations may go to the model: show, hide, or ask (once) first.
+    CitedAuthors { choice: String },
 }
 
 #[derive(Subcommand)]
@@ -219,6 +222,7 @@ pub fn run() -> i32 {
             ListsCmd::AddTapu { term } => config::lists_add(Tapu, &term),
             ListsCmd::AddAllow { term } => config::lists_add(Allow, &term),
             ListsCmd::Remove { term } => config::lists_remove(&term),
+            ListsCmd::CitedAuthors { choice } => config::cited_authors(&choice),
         },
         Cmd::Model { action } => match action {
             ModelCmd::Status => config::model_status(),
