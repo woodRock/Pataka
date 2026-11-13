@@ -42,7 +42,27 @@ function restoresInput(tool: string): boolean {
 const RESERVED = new Set(['tool', 'tool_use_id', 'agentId', 'requestMeta', 'consent'])
 /** Rows the model never reads, or that it wrote itself from placeholders. */
 const SKIP_DOORS = new Set(['response', 'compaction', 'notice'])
-const PLACEHOLDER = /\[[A-Z][A-Z_]*_\d+\]/
+/** A placeholder; forms of one person's name add a letter to the number. */
+const PLACEHOLDER = /\[[A-Z][A-Z_]*_\d+[A-Z]?\]/
+
+/** `pataka run` puts placeholders back itself, as the command runs. */
+const PATAKA_RUN = /(?:^|[\s;&|(])pataka\s+run(?:\s|$)/
+
+/** Whether a Bash call goes through `pataka run`: its input stays as written. */
+function runsThroughPataka(args: Record<string, unknown>): boolean {
+  return typeof args.command === 'string' && PATAKA_RUN.test(args.command)
+}
+
+// Example placeholders for the note, built here so this file holds none.
+const eg = (label: string, n: string) => `[${label}_${n}]`
+
+/** What the model is told about placeholders, as a system prompt section. */
+export const NOTE = [
+  `Privacy note from Pātaka: text in square brackets such as ${eg('PERSON', '1')} or ${eg('EMAIL', '2')} is a placeholder for private information that stays on the user's computer.`,
+  `Treat each placeholder as the real value and use it exactly as written; never guess what it stands for, and do not call the information missing.`,
+  `Placeholders that share a number, such as ${eg('PERSON', '3')} and ${eg('PERSON', '3B')}, are different written forms of one name (a full name and a surname alone, say), so they very likely refer to the same person.`,
+  `Pātaka puts real values back into the arguments of tools on this computer before they run. When a shell command needs real values but Claude Code refuses it because a hook changed its input (as auto mode does), run it as \`pataka run -- <command> [arguments]\` instead: the command is checked as written, and Pātaka puts the real values into its arguments only as it runs. Its arguments go to the program directly, not through a shell, so use it for one program and its arguments, without pipes or redirection.`,
+].join(' ')
 
 let base: string | undefined
 let redactedCount = 0
@@ -199,6 +219,8 @@ export const register: Register = on => {
     if (!restoresInput(e.tool)) return next(e)
     const args: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(e)) if (!RESERVED.has(k)) args[k] = v
+    // Left exactly as written, so auto mode reviews what runs.
+    if (e.tool === 'Bash' && runsThroughPataka(args)) return next(e)
     if (!PLACEHOLDER.test(JSON.stringify(args))) return next(e)
     const { value } = await call<{ value: Record<string, Json> }>($, 'restore', { value: args })
     return next({ ...e, ...value } as typeof e)
@@ -225,6 +247,13 @@ export const register: Register = on => {
       restoredText.set(text, shown)
     }
     return next({ ...e, props: { ...e.props, text: shown } })
+  }).catch(($, e, next) => next(e))
+
+  // Tell the model what placeholders are, and how to run a command that
+  // needs real values without a hook changing it.
+  on('prompt.compose', async ($, e, next) => {
+    const out = await next(e)
+    return { ...out, sections: [...out.sections, { id: 'tumataiti:placeholders', text: NOTE, scope: 'session' }] }
   }).catch(($, e, next) => next(e))
 
   on('session.start', async ($, e, next) => {

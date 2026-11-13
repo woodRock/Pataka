@@ -111,6 +111,91 @@ pub fn hook_prompt() -> Result<i32> {
     Ok(0)
 }
 
+/// The session's restore address, from the prompt hook's
+/// (`…/s/<token>/pataka/check-prompt`): only ever this computer.
+fn restore_url() -> Option<String> {
+    let url = std::env::var("PATAKA_HOOK_URL").ok()?;
+    let base = url.strip_suffix("/pataka/check-prompt")?;
+    base.starts_with("http://127.0.0.1:")
+        .then(|| format!("{base}/pataka/restore"))
+}
+
+/// Could `arg` hold a placeholder? Cheap, so a command with none runs
+/// without asking the service.
+fn may_hold_placeholder(arg: &str) -> bool {
+    arg.find('[').is_some_and(|i| arg[i..].contains(']'))
+}
+
+/// `pataka run -- <command> [args…]`: put the session's placeholders in the
+/// arguments back to real values, then run the command. Claude Code checks
+/// (and auto mode reviews) the command with its placeholders, because no
+/// hook rewrites it; the real values exist only in the process that runs.
+/// The arguments go to the program directly, never through a shell, so a
+/// real value cannot change what the command does.
+pub fn run(command: Vec<String>) -> Result<i32> {
+    use pataka_core::error::Error;
+    let mut args = command;
+    if args.first().is_some_and(|a| a == "--") {
+        args.remove(0);
+    }
+    if args.is_empty() {
+        return Err(Error::Invalid("Give a command to run: pataka run -- <command> [arguments]".into()));
+    }
+    if args.iter().any(|a| may_hold_placeholder(a)) {
+        let url = restore_url().ok_or_else(|| {
+            Error::Invalid(
+                "pataka run puts placeholders back only inside a Claude Code session that runs through Pātaka (PATAKA_HOOK_URL is not set here).".into(),
+            )
+        })?;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let res: std::result::Result<(u16, Value), reqwest::Error> = rt.block_on(async {
+            let r = reqwest::Client::new().post(&url).json(&json!({"value": args})).send().await?;
+            let status = r.status().as_u16();
+            Ok((status, r.json().await?))
+        });
+        let restored = match res {
+            Ok((200, v)) => v["value"].as_array().map(|a| {
+                a.iter()
+                    .map(|x| x.as_str().map(String::from))
+                    .collect::<Option<Vec<String>>>()
+            }),
+            Ok((_, v)) => {
+                let why = v["error"]["message"]
+                    .as_str()
+                    .or(v["error"].as_str())
+                    .unwrap_or("it gave an error");
+                return Err(Error::Invalid(format!(
+                    "Pātaka could not put the real values back ({why}), so nothing ran. Run `pataka unlock` if it is locked."
+                )));
+            }
+            Err(_) => {
+                return Err(Error::Invalid(
+                    "Pātaka's service is not answering, so nothing ran. Check it with `pataka service status`.".into(),
+                ))
+            }
+        };
+        args = restored
+            .flatten()
+            .filter(|a| a.len() == args.len())
+            .ok_or_else(|| Error::Invalid("Pātaka gave an unexpected answer, so nothing ran.".into()))?;
+    }
+    let mut cmd = std::process::Command::new(&args[0]);
+    cmd.args(&args[1..]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = cmd.exec();
+        Err(Error::Invalid(format!("Could not run {}: {err}", args[0])))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd
+            .status()
+            .map_err(|e| Error::Invalid(format!("Could not run {}: {e}", args[0])))?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
 /// Permission modes in which the person has handed approvals to Claude Code
 /// (its auto-mode classifier, or no prompts at all). A hook "ask" would
 /// override that choice and prompt on every MCP tool, so the guard steps
@@ -229,6 +314,20 @@ pub fn hook_pretool() -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_bracketed_arguments_ask_the_service() {
+        let ph = format!("[{}_3B]", "PERSON");
+        assert!(may_hold_placeholder(&format!("{ph} wrote")));
+        assert!(!may_hold_placeholder("abd7e9a108"));
+        assert!(!may_hold_placeholder("a [b"));
+        assert!(!may_hold_placeholder("b] a"));
+    }
+
+    #[test]
+    fn run_without_a_command_is_refused() {
+        assert!(run(vec!["--".into()]).is_err());
+    }
 
     #[test]
     fn tool_guard_steps_aside_in_auto_mode() {

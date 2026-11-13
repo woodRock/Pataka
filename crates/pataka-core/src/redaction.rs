@@ -25,6 +25,12 @@ pub struct Vault {
     /// "CATEGORY|folded text" → placeholder.
     pub entities: BTreeMap<String, String>,
     pub counters: BTreeMap<Category, usize>,
+    /// Authors of published work, seen where a bibliography lists them
+    /// (`authors::bibliographic_names`). Their names are not hidden. Kept in
+    /// memory only: the list is gone when the service locks or restarts, so
+    /// a name is never public for longer than the work that showed it.
+    #[serde(skip)]
+    pub public_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -414,7 +420,7 @@ fn allowed(kaupapa: &Kaupapa, extra_allow: &[String]) -> Vec<String> {
 /// how old the kōrero is.
 fn fill_known(text: &str, kaupapa: &Kaupapa, extra_allow: &[String], vault: &Vault, spans: &mut Vec<Span>) {
     let mut known = Vec::new();
-    term_spans(text, &known_terms(vault), "korero_term", &mut known);
+    term_spans(text, &known_terms(vault), "known_value", &mut known);
     // A name is caught again only where it is written as one: `Mark` the
     // person, not "mark as read".
     // Nor where it is joined by `_` into an identifier: `NAME_AGENT` is an
@@ -509,6 +515,49 @@ fn widen_emails(text: &str, spans: &mut Vec<Span>) {
     }
 }
 
+/// The person number in a person placeholder: 7 for both the first form
+/// (`[PERSON_` `7]`) and a linked one (`[PERSON_` `7B]`).
+fn person_number(placeholder: &str) -> Option<usize> {
+    let rest = placeholder.strip_prefix('[')?.strip_suffix(']')?;
+    let rest = rest.strip_prefix(Category::Person.label())?.strip_prefix('_')?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let tail = &rest[digits.len()..];
+    (tail.is_empty() || (tail.len() == 1 && tail.chars().all(|c| c.is_ascii_uppercase())))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// A placeholder for another written form of a person this kōrero already
+/// has: `Sweeney, L.` after `Latanya Sweeney` gets the same number with a
+/// letter (`B`, `C`, …), so the model can tell it is the same name, while
+/// each form still restores to exactly what was written. Only when every
+/// earlier form it could be belongs to one person; two people who share a
+/// surname leave the surname alone with a number of its own.
+fn linked_placeholder(vault: &Vault, written: &str) -> Option<String> {
+    let name = crate::authors::parse(written)?;
+    let mut numbers: Vec<usize> = vault
+        .placeholders
+        .iter()
+        .filter_map(|(p, original)| {
+            let n = person_number(p)?;
+            let other = crate::authors::parse(original)?;
+            // A surname alone fits everyone with that surname, so it says
+            // nothing about which of them a fuller form is.
+            let says_who = name.given.is_empty() || !other.given.is_empty();
+            (says_who && crate::authors::compatible(&name, &other)).then_some(n)
+        })
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    let [n] = numbers[..] else {
+        return None;
+    };
+    let label = Category::Person.label();
+    ('B'..='Z')
+        .map(|letter| format!("[{label}_{n}{letter}]"))
+        .find(|p| !vault.placeholders.contains_key(p))
+}
+
 fn generalise(span: &Span) -> String {
     if span.category == Category::Date {
         let year = span
@@ -538,9 +587,24 @@ pub fn redact(
     // it appears, even where no detector would find it this time (a model
     // reply that repeats a name, a name in a different sentence), but what is
     // detected now decides the label.
+    for name in crate::authors::bibliographic_names(text) {
+        if !vault.public_names.contains(&name) {
+            vault.public_names.push(name);
+        }
+    }
     let mut spans = detect(text, kaupapa, extra_terms, extra_allow, model);
     fill_known(text, kaupapa, extra_allow, vault, &mut spans);
     widen_emails(text, &mut spans);
+    // Authors a bibliography has listed are public, in whatever form they
+    // are written. A typed list or a gazetteer entry still wins: those are
+    // the person's own choices, so only detected names are let through.
+    if !vault.public_names.is_empty() {
+        spans.retain(|s| {
+            s.category != Category::Person
+                || (s.source == Source::Gazetteer && s.detector != "known_value")
+                || !crate::authors::is_public(&s.text, &vault.public_names)
+        });
+    }
     // Placeholders already in the text (in a model's reply) stay as they are.
     let issued: Vec<(usize, usize)> = vault
         .placeholders
@@ -569,9 +633,14 @@ pub fn redact(
                 let placeholder = match vault.entities.get(&key) {
                     Some(p) => p.clone(),
                     None => {
-                        let n = vault.counters.entry(span.category).or_insert(0);
-                        *n += 1;
-                        let p = format!("[{}_{}]", span.category.label(), n);
+                        let linked = (span.category == Category::Person)
+                            .then(|| linked_placeholder(vault, &span.text))
+                            .flatten();
+                        let p = linked.unwrap_or_else(|| {
+                            let n = vault.counters.entry(span.category).or_insert(0);
+                            *n += 1;
+                            format!("[{}_{}]", span.category.label(), n)
+                        });
                         vault.entities.insert(key, p.clone());
                         p
                     }
@@ -1117,5 +1186,99 @@ mod record_key_tests {
             v.entities.insert(entity_key(cat, value), p);
         }
         assert_eq!(run(text, &[], &mut v), text);
+    }
+}
+
+#[cfg(test)]
+mod name_form_tests {
+    use super::*;
+
+    fn span(text: &str, needle: &str) -> Span {
+        let start = text.find(needle).unwrap();
+        Span {
+            start,
+            end: start + needle.len(),
+            text: needle.into(),
+            category: Category::Person,
+            confidence: 0.95,
+            source: Source::Model,
+            detector: "test-model".into(),
+            checksum: Checksum::None,
+            note: None,
+        }
+    }
+
+    fn run(text: &str, names: &[&str], v: &mut Vault) -> String {
+        let model: Vec<Span> = names.iter().map(|n| span(text, n)).collect();
+        redact(text, &Kaupapa::default(), &[], &[], &model, v).output
+    }
+
+    /// Person placeholder `n` with an optional form letter, built at run time.
+    fn ph(n: usize, letter: &str) -> String {
+        format!("[{}_{n}{letter}]", Category::Person.label())
+    }
+
+    #[test]
+    fn forms_of_one_name_share_a_number_and_restore_exactly() {
+        let mut v = Vault::default();
+        assert_eq!(run("By Aroha Kereama.", &["Aroha Kereama"], &mut v), format!("By {}.", ph(1, "")));
+        let text = "Kereama, A. and later Kereama alone.";
+        let mut alone = span(text, "Kereama");
+        alone.start = text.rfind("Kereama").unwrap();
+        alone.end = alone.start + "Kereama".len();
+        let out = redact(text, &Kaupapa::default(), &[], &[], &[span(text, "Kereama, A."), alone], &mut v).output;
+        assert_eq!(out, format!("{} and later {} alone.", ph(1, "B"), ph(1, "C")));
+        assert_eq!(restore(&out, &v), "Kereama, A. and later Kereama alone.");
+        // Another person is a new number.
+        assert_eq!(run("Then Mere Tipene.", &["Mere Tipene"], &mut v), format!("Then {}.", ph(2, "")));
+    }
+
+    #[test]
+    fn a_shared_surname_is_not_linked_to_either_person() {
+        let mut v = Vault::default();
+        run("Aroha Kereama and Hemi Kereama.", &["Aroha Kereama", "Hemi Kereama"], &mut v);
+        let out = run("Ask Kereama.", &["Kereama"], &mut v);
+        assert_eq!(out, format!("Ask {}.", ph(3, "")));
+        // An initial still tells them apart.
+        let out = run("Ask H. Kereama.", &["H. Kereama"], &mut v);
+        assert_eq!(out, format!("Ask {}.", ph(2, "B")));
+    }
+
+    #[test]
+    fn listed_authors_are_not_hidden_in_any_form() {
+        let mut v = Vault::default();
+        // Hidden before any bibliography lists her.
+        let early = "Aroha Kereama wrote it.";
+        assert!(!run(early, &["Aroha Kereama"], &mut v).contains("Aroha"));
+        let json = r#"{"key": "kereama2020x", "authors": ["Aroha Kereama"]}"#;
+        assert_eq!(run(json, &["Aroha Kereama"], &mut v), json);
+        let byline = "KEREAMA, A. (2020). As Kereama argues, and Aroha Kereama wrote it.";
+        assert_eq!(run(byline, &["KEREAMA, A.", "Kereama", "Aroha Kereama"], &mut v), byline);
+        // Someone else with the surname is still hidden.
+        assert!(!run("Hemi Kereama replied.", &["Hemi Kereama"], &mut v).contains("Hemi"));
+        // Public names are not saved with the kōrero.
+        let saved: Vault = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+        assert!(saved.public_names.is_empty());
+    }
+
+    #[test]
+    fn a_typed_person_list_still_wins_over_a_bibliography() {
+        let mut v = Vault::default();
+        let k = Kaupapa::default();
+        let terms = [Term {
+            term: "Aroha Kereama".into(),
+            category: Category::Person,
+        }];
+        let text = "author = {Aroha Kereama}";
+        let out = redact(text, &k, &terms, &[], &[], &mut v).output;
+        assert!(!out.contains("Aroha"), "{out}");
+    }
+
+    #[test]
+    fn person_numbers_read_both_forms() {
+        assert_eq!(person_number(&ph(7, "")), Some(7));
+        assert_eq!(person_number(&ph(12, "C")), Some(12));
+        assert_eq!(person_number("[EMAIL_3]"), None);
+        assert_eq!(person_number(&format!("[{}_7BB]", Category::Person.label())), None);
     }
 }
