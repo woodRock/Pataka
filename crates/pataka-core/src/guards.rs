@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn mail_reads_do_not_ask() {
-        for t in ["search", "read", "thread", "drafts", "list_labels"] {
+        for t in ["search", "read", "thread", "attachment", "drafts", "list_labels"] {
             let tool = format!("mcp__pataka-mail__{t}");
             assert!(review_tool(&tool, &json!({"query": "from:x"}), &ws()).is_none(), "{t}");
             assert!(review_tool_auto(&tool, &json!({}), &ws()).is_none(), "{t}");

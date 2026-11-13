@@ -114,13 +114,40 @@ function textSlots(blocks: Block[], out: { get: () => string; set: (s: string) =
   }
 }
 
-/** Images and documents cannot be checked, so they are replaced with a note. */
-function withoutMedia(blocks: Block[]): Block[] {
-  return blocks.map(b => {
-    if (b.type === 'image' || b.type === 'document') return { type: 'text', text: MEDIA }
-    if (Array.isArray(b.content)) return { ...b, content: withoutMedia(b.content as Block[]) }
-    return { ...b }
-  })
+/**
+ * Images cannot be checked, so they are replaced with a note. A PDF becomes
+ * its text, read on this computer by the Pātaka service (pictures in it are
+ * not read), and a plain-text document becomes its text: both are then
+ * redacted with the rest of the row.
+ */
+async function readableMedia($: Dollar, blocks: Block[]): Promise<Block[]> {
+  const out: Block[] = []
+  for (const b of blocks) {
+    if (b.type === 'image') out.push({ type: 'text', text: MEDIA })
+    else if (b.type === 'document') out.push({ type: 'text', text: await documentText($, b) })
+    else if (Array.isArray(b.content)) out.push({ ...b, content: await readableMedia($, b.content as Block[]) })
+    else out.push({ ...b })
+  }
+  return out
+}
+
+/** A document block's text, or a note saying why it was withheld. */
+async function documentText($: Dollar, b: Block): Promise<string> {
+  const src = (b.source ?? {}) as { type?: string; media_type?: string; data?: unknown }
+  const title = typeof b.title === 'string' ? b.title : undefined
+  if (src.type === 'text' && typeof src.data === 'string') {
+    return `[document${title ? ` "${title}"` : ''}]\n${src.data}`
+  }
+  if (src.type === 'base64' && src.media_type === 'application/pdf' && typeof src.data === 'string') {
+    try {
+      const r = await call<{ text?: unknown }>($, 'pdf-text', { data: src.data, title })
+      if (typeof r.text === 'string') return r.text
+    } catch (err) {
+      const why = (err as Error).message.replace(LOCKED_HINT, '').trim()
+      return `[document withheld by Pātaka: ${why}]`
+    }
+  }
+  return MEDIA
 }
 
 /** What a row says when it could not be checked: tool results keep their ids. */
@@ -150,7 +177,7 @@ export const register: Register = on => {
   // injected context. Only the redacted row is stored, so only it is sent.
   on('session.append', async ($, e, next) => {
     if (SKIP_DOORS.has(e.door) || e.message.type === 'system') return next(e)
-    const content = withoutMedia(e.message.content as Block[])
+    const content = await readableMedia($, e.message.content as Block[])
     const slots: { get: () => string; set: (s: string) => void }[] = []
     textSlots(content, slots)
     if (slots.length === 0) return next({ ...e, message: { ...e.message, content } })

@@ -20,6 +20,10 @@ pub const SEARCH_LIMIT: usize = 50;
 pub const MAX_IDS: usize = 2000;
 /// Longest body `read` returns, in bytes.
 pub const BODY_LIMIT: usize = 20 * 1024;
+/// The text of an attachment is cut at this many bytes; ask for later pages.
+pub const ATTACHMENT_TEXT_LIMIT: usize = 40 * 1024;
+/// Attachments are only opened in emails up to this size.
+pub const ATTACHMENT_MESSAGE_LIMIT: usize = 50 * 1024 * 1024;
 const SNIPPET: usize = 160;
 /// Most text one `thread` result holds, across its messages.
 pub const THREAD_LIMIT: usize = 60 * 1024;
@@ -334,6 +338,78 @@ fn structure_attachments(t: &Tok, out: &mut Vec<(String, usize)>) {
     let size = if enc == "base64" { octets / 4 * 3 } else { octets };
     let name = name.map(|n| decode_words(&n)).unwrap_or_else(|| "unnamed".into());
     out.push((name, size));
+}
+
+/// The text of the attachment called `name` (or, failing an exact match,
+/// the one whose name contains it) in a whole raw message, with a heading
+/// naming the message `id`. Only PDFs with a text layer.
+fn attachment_text(raw: &[u8], id: &str, name: &str, pages: Option<&str>) -> Result<String> {
+    let m = MessageParser::default()
+        .parse(raw)
+        .ok_or_else(|| Error::Invalid("That message could not be read.".into()))?;
+    let parts: Vec<_> = m.attachments().collect();
+    let names: Vec<String> = parts
+        .iter()
+        .map(|a| a.attachment_name().unwrap_or("unnamed").to_string())
+        .collect();
+    let exact: Vec<usize> = (0..parts.len())
+        .filter(|&i| names[i].eq_ignore_ascii_case(name))
+        .collect();
+    let i = match exact.as_slice() {
+        [i] => *i,
+        [i, ..] => *i,
+        [] => {
+            let close: Vec<usize> = (0..parts.len())
+                .filter(|&i| names[i].to_lowercase().contains(&name.to_lowercase()))
+                .collect();
+            match close.as_slice() {
+                [i] => *i,
+                _ => {
+                    return Err(Error::Invalid(if names.is_empty() {
+                        "That email has no attachments.".into()
+                    } else {
+                        format!(
+                            "No attachment is called \"{name}\". This email has: {}.",
+                            names.join(", ")
+                        )
+                    }))
+                }
+            }
+        }
+    };
+    let part = parts[i];
+    let bytes = part.contents();
+    let kind = part
+        .content_type()
+        .map(|c| match c.subtype() {
+            Some(s) => format!("{}/{}", c.ctype(), s).to_lowercase(),
+            None => c.ctype().to_lowercase(),
+        })
+        .unwrap_or_default();
+    let is_pdf = kind == "application/pdf" || names[i].to_lowercase().ends_with(".pdf") || bytes.starts_with(b"%PDF-");
+    if !is_pdf {
+        let what = if kind.starts_with("image/") {
+            "an image. Pātaka does not read images yet".to_string()
+        } else {
+            format!(
+                "a {} file. Pātaka reads the text of PDF attachments so far",
+                if kind.is_empty() { "kind of" } else { &kind }
+            )
+        };
+        return Err(Error::Invalid(format!(
+            "{} is {what}, so nothing from it was sent.",
+            names[i]
+        )));
+    }
+    let text = crate::pdf::extract(bytes).map_err(|e| Error::Invalid(format!("{}: {e}", names[i])))?;
+    let range = crate::pdf::page_range(pages, text.pages.len())?;
+    Ok(format!(
+        "attachment: {} ({}, {} page(s)), from {id}\nOnly the text was read, on this computer; pictures in it were not.\n\n{}",
+        names[i],
+        size_text(bytes.len()),
+        text.pages.len(),
+        text.render(range, ATTACHMENT_TEXT_LIMIT)
+    ))
 }
 
 /// Decode an RFC 2047 encoded name (`=?utf-8?B?...?=`); anything else as is.
@@ -749,6 +825,58 @@ impl Mailer {
             .next()
             .ok_or_else(|| Error::NotFound("that message".into()))?;
         Ok(format!("{UNTRUSTED}\n\n{}", self.render(&f, &folder, BODY_LIMIT)?))
+    }
+
+    /// The text of one attachment, read on this computer. Only PDFs with a
+    /// text layer so far; anything else is refused and nothing of it is sent.
+    pub async fn attachment(&mut self, id: &str, name: &str, pages: Option<&str>) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Invalid(
+                "Give the attachment's name, as read or thread lists it.".into(),
+            ));
+        }
+        let id = MsgId::parse(id)?;
+        let uid = match &id {
+            MsgId::Gmail { .. } => {
+                let all = self.all_mail();
+                self.imap.open(&all, false).await?;
+                self.gmail_uids(std::slice::from_ref(&id)).await?[0].0
+            }
+            MsgId::Folder { uid, mailbox } => {
+                let mb = self.folder(mailbox);
+                self.imap.open(&mb, false).await?;
+                *uid
+            }
+        };
+        // Check the size before fetching the whole message.
+        let size = self
+            .imap
+            .fetch(&[uid], "UID RFC822.SIZE")
+            .await?
+            .into_iter()
+            .next()
+            .and_then(|f| f.get("RFC822.SIZE").and_then(|t| t.text()?.parse::<usize>().ok()))
+            .ok_or_else(|| Error::NotFound("that message".into()))?;
+        if size > ATTACHMENT_MESSAGE_LIMIT {
+            return Err(Error::Invalid(format!(
+                "That email is {}; Pātaka opens attachments in emails up to {}.",
+                size_text(size),
+                size_text(ATTACHMENT_MESSAGE_LIMIT)
+            )));
+        }
+        let f = self
+            .imap
+            .fetch(&[uid], "UID BODY.PEEK[]")
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NotFound("that message".into()))?;
+        let raw = f
+            .body()
+            .ok_or_else(|| Error::Invalid("That message could not be read.".into()))?;
+        let text = attachment_text(raw, &id.to_string(), name, pages)?;
+        Ok(format!("{UNTRUSTED}\n\n{text}"))
     }
 
     /// Items for a whole message. Always `BODY.PEEK`, so reading never marks
@@ -1816,5 +1944,69 @@ mod gmail_date_tests {
         ] {
             assert_eq!(gmail_query(q), q);
         }
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::attachment_text;
+    use base64::Engine;
+
+    /// An email with a PDF, an image and a Word file attached.
+    fn message() -> Vec<u8> {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let pdf = crate::pdf::tests::pdf(&[
+            "Comments on the method: justify the dilated convolutions.",
+            "Second page of comments, about results.",
+        ]);
+        let part = |ty: &str, name: &str, data: &[u8]| {
+            format!("--b\r\nContent-Type: {ty}; name=\"{name}\"\r\nContent-Disposition: attachment; filename=\"{name}\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n", b64(data))
+        };
+        format!(
+            "From: a@example.org\r\nTo: b@example.org\r\nSubject: Comments\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nPlease see the attached comments.\r\n{}{}{}--b--\r\n",
+            part("application/pdf", "Comments on draft.pdf", &pdf),
+            part("image/png", "figure.png", b"\x89PNG not really"),
+            part("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "draft.docx", b"PK not really"),
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn reads_a_pdf_attachment_by_name() {
+        let raw = message();
+        let t = attachment_text(&raw, "mail_1", "Comments on draft.pdf", None).unwrap();
+        assert!(t.starts_with("attachment: Comments on draft.pdf ("), "{t}");
+        assert!(t.contains("2 page(s)), from mail_1"), "{t}");
+        assert!(t.contains("dilated convolutions") && t.contains("about results"), "{t}");
+        // A unique part of the name is enough, and pages narrow it down.
+        let t = attachment_text(&raw, "mail_1", "comments", Some("2")).unwrap();
+        assert!(t.contains("about results") && !t.contains("dilated"), "{t}");
+    }
+
+    #[test]
+    fn refuses_what_it_cannot_read() {
+        let raw = message();
+        let e = attachment_text(&raw, "mail_1", "figure.png", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("is an image") && e.contains("nothing from it was sent"),
+            "{e}"
+        );
+        let e = attachment_text(&raw, "mail_1", "draft.docx", None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("PDF attachments so far"), "{e}");
+        let e = attachment_text(&raw, "mail_1", "minutes.pdf", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("This email has: Comments on draft.pdf, figure.png, draft.docx"),
+            "{e}"
+        );
+        let e = attachment_text(&raw, "mail_1", "Comments on draft.pdf", Some("7"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("numbered 1 to 2"), "{e}");
     }
 }

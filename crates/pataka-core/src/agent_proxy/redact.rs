@@ -262,7 +262,20 @@ impl Redactor<'_> {
                     b["text"] = Value::String(r);
                 }
             }
-            "image" | "document" => *b = self.withhold(),
+            "document" => match document_text(b) {
+                // A PDF's text, or a plain-text document: redacted like any
+                // other text. Pictures are never sent.
+                Ok(Some(t)) => {
+                    let r = self.text(&t);
+                    *b = json!({"type": "text", "text": r});
+                }
+                Ok(None) => *b = self.withhold(),
+                Err(why) => {
+                    self.stats.withheld_media += 1;
+                    *b = json!({"type": "text", "text": format!("[document withheld by Pātaka: {why}]")});
+                }
+            },
+            "image" => *b = self.withhold(),
             "tool_use" | "server_tool_use" => {
                 if let Some(input) = b.get_mut("input") {
                     self.strings(input);
@@ -319,6 +332,62 @@ impl Redactor<'_> {
         }
         // `tools` (definitions) and `metadata` carry no conversation text and
         // are left as they are.
+    }
+}
+
+/// Text of a PDF read on this computer is cut at this size; the agent can
+/// read later pages on its own (Claude Code's Read takes a page range).
+const DOCUMENT_TEXT_LIMIT: usize = 100 * 1024;
+
+/// Recently read PDFs, by SHA-256: the whole conversation is sent again on
+/// every turn, and reading a long PDF takes seconds.
+/// SHA-256 of a PDF, and its text.
+type PdfCache = std::sync::Mutex<Vec<([u8; 32], String)>>;
+static PDF_CACHE: std::sync::LazyLock<PdfCache> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+const PDF_CACHE_SIZE: usize = 8;
+
+/// The text in a `document` block: a base64 PDF's text layer, or a plain-text
+/// source. `Ok(None)` for anything else (a URL, a file id, other media), and
+/// `Err` with the reason when a PDF cannot be read.
+pub(crate) fn document_text(b: &Value) -> std::result::Result<Option<String>, String> {
+    use base64::Engine;
+    use sha2::Digest;
+    let src = &b["source"];
+    let title = b["title"].as_str().map(|t| format!(" \"{t}\"")).unwrap_or_default();
+    match (src["type"].as_str(), src["media_type"].as_str()) {
+        (Some("text"), _) => Ok(src["data"].as_str().map(|d| format!("[document{title}]\n{d}"))),
+        (Some("base64"), Some("application/pdf")) => {
+            let data = src["data"].as_str().unwrap_or_default();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data.as_bytes())
+                .map_err(|_| "it could not be decoded".to_string())?;
+            let hash: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+            let cached = PDF_CACHE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .find(|(h, _)| *h == hash)
+                .map(|(_, t)| t.clone());
+            let text = match cached {
+                Some(t) => t,
+                None => {
+                    let pdf = crate::pdf::extract(&bytes).map_err(|e| e.to_string())?;
+                    let t = format!(
+                        "[PDF{title}, {} page(s): only its text was read, on this computer, by Pātaka; pictures in it were not read]\n\n{}",
+                        pdf.pages.len(),
+                        pdf.render(0..pdf.pages.len(), DOCUMENT_TEXT_LIMIT)
+                    );
+                    let mut c = PDF_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+                    if c.len() >= PDF_CACHE_SIZE {
+                        c.remove(0);
+                    }
+                    c.push((hash, t.clone()));
+                    t
+                }
+            };
+            Ok(Some(text))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -560,6 +629,56 @@ mod tests {
         assert!(s.contains("\"signature\":\"sig\""), "thinking untouched");
         assert!(s.contains("grep -r '[PERSON_1]' ."), "{s}");
         assert_eq!(body["messages"][0]["content"], "Fix the bug [PERSON_1] reported");
+    }
+
+    #[test]
+    fn pdfs_become_redacted_text_and_images_stay_withheld() {
+        use base64::Engine;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        // Built at run time, so no placeholder is written in this file.
+        let email_ph = format!("{}{}_1]", "[", "EMAIL");
+        let k = kaupapa();
+        let mut v = Vault::default();
+        let none = |_: &str| Vec::new();
+        let paper = crate::pdf::tests::pdf(&[
+            "Method section: write to kiri@kowhai.nz with questions.",
+            "Or ring 021 555 0199 after 5pm.",
+        ]);
+        let scanned = crate::pdf::tests::pdf(&[""]);
+        let mut body = json!({"messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "r1", "content": [
+            {"type": "document", "title": "paper.pdf", "source": {"type": "base64", "media_type": "application/pdf", "data": b64(&paper)}},
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64(&scanned)}},
+            {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "Notes for kiri@kowhai.nz"}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+        ]}]}]});
+        let mut r = redactor(&k, &mut v, &none);
+        r.request(&mut body);
+        let items = &body["messages"][0]["content"][0]["content"];
+        let pdf_text = items[0]["text"].as_str().unwrap();
+        assert_eq!(items[0]["type"], "text");
+        assert!(
+            pdf_text.contains("Method section") && pdf_text.contains("page 2 of 2"),
+            "{pdf_text}"
+        );
+        assert!(
+            !pdf_text.contains("kowhai") && !pdf_text.contains("555 0199"),
+            "PDF text redacted: {pdf_text}"
+        );
+        assert!(pdf_text.contains(&email_ph), "{pdf_text}");
+        assert!(
+            items[1]["text"].as_str().unwrap().contains("no text to read"),
+            "scanned PDFs are withheld, saying why"
+        );
+        assert!(
+            items[2]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("Notes for {email_ph}")),
+            "text documents are redacted"
+        );
+        assert_eq!(r.stats.withheld_media, 2, "the scanned PDF and the image");
+        assert!(!body.to_string().contains("AAAA"), "images are still withheld");
     }
 
     #[test]

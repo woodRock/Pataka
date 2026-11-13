@@ -151,7 +151,7 @@ More about the mod: [mods/tumataiti/README.md](mods/tumataiti/README.md).
 
 ### Optional: your email
 
-In the app, **Settings → Mail** (or `pataka mail connect` in a terminal) lets Claude read and tidy your mailbox, with every email redacted before Claude sees it. It never sends or permanently deletes anything, and `pataka mail undo` reverses a change. See [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md#mail).
+In the app, **Settings → Mail** (or `pataka mail connect` in a terminal) lets Claude read and tidy your mailbox, with every email redacted before Claude sees it. It can read the text of PDF attachments too, redacted the same way (images are not read yet). It never sends or permanently deletes anything, and `pataka mail undo` reverses a change. See [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md#mail).
 
 ## Troubleshooting
 
@@ -257,7 +257,7 @@ An agent kōrero runs Claude Code in the folder you choose, the way T3 Code driv
                        └── approvals in Pātaka
 ```
 
-- **What leaves your computer:** only redacted text. The proxy redacts the system prompt (with your account name in paths replaced), your messages, file contents and command output in tool results, and the arguments of earlier tool calls. Images and PDFs are withheld, because they cannot be checked. Secrets the agent reads, such as an API key in a `.env` file, are masked. Tapu terms stop the request.
+- **What leaves your computer:** only redacted text. The proxy redacts the system prompt (with your account name in paths replaced), your messages, file contents and command output in tool results, and the arguments of earlier tool calls. A PDF becomes its text, read on this computer and redacted like the rest (pictures in it are not read); images and scanned PDFs are withheld, because they cannot be checked yet. Secrets the agent reads, such as an API key in a `.env` file, are masked. Tapu terms stop the request.
 - **What comes back:** placeholders are restored in the reply and in the arguments of tools that act only on your computer (Bash, Read, Write, Edit, Grep, Glob and the like), so files get the real names. Web fetches, MCP tools and unknown tools keep their placeholders.
 - **Approvals:** *Ask before acting* (default), *Allow file edits, ask for commands*, *Plan only*, or *Auto* (opt-in per kōrero, after a one-time confirmation). In every mode, Pātaka's guards still ask before commands that send data off the computer or reach outside the folder, web fetches and MCP tools; every tool call is shown and recorded in the audit log; Stop always works. Bypassing permissions is not offered. Each request shows the exact command or diff, with real values, and *Always allow* lasts only for that session.
 - **Claude Code's own background traffic** (telemetry, error reports, update checks) is switched off for agent sessions.
