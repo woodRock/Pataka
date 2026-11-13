@@ -231,9 +231,23 @@ impl ServiceHost {
         self.key.read().unwrap_or_else(|p| p.into_inner()).is_none()
     }
 
+    /// Load a kōrero. If the service's own kōrero was deleted (say in the
+    /// desktop app), start a fresh one under the same id so `service.json`
+    /// still points at it; its old placeholders went with it.
+    fn conversation(&self, key: &DataKey, korero: &str) -> Result<Conversation> {
+        match self.store.load_conversation(key, korero) {
+            Err(Error::NotFound(_)) if korero == self.korero => {
+                let c = new_service_korero(korero.to_string());
+                self.store.save_conversation(key, &c)?;
+                Ok(c)
+            }
+            r => r,
+        }
+    }
+
     /// Unlock with a key already in hand.
     pub fn set_key(&self, key: DataKey) -> Result<()> {
-        let conv = self.store.load_conversation(&key, &self.korero)?;
+        let conv = self.conversation(&key, &self.korero)?;
         *self.vault.lock().unwrap_or_else(|p| p.into_inner()) = conv.vault;
         *self.key.write().unwrap_or_else(|p| p.into_inner()) = Some(key);
         let _ = audit::append(
@@ -252,7 +266,7 @@ impl Host for ServiceHost {
     fn context(&self, korero: &str) -> Result<(Kaupapa, Vec<Term>, Vec<String>)> {
         let key = self.key()?;
         let s = self.store.load_settings(&key)?;
-        let c = self.store.load_conversation(&key, korero)?;
+        let c = self.conversation(&key, korero)?;
         Ok((s.kaupapa, c.terms, c.allow))
     }
 
@@ -269,7 +283,7 @@ impl Host for ServiceHost {
 
     fn save_vault(&self, korero: &str, vault: &Vault) -> Result<()> {
         let key = self.key()?;
-        let mut c = self.store.load_conversation(&key, korero)?;
+        let mut c = self.conversation(&key, korero)?;
         c.vault = vault.clone();
         c.updated_at = model::now();
         self.store.save_conversation(&key, &c)
@@ -493,9 +507,15 @@ fn service_korero(store: &Store, key: &DataKey, known: Option<&str>) -> Result<C
             }
         }
     }
+    let c = new_service_korero(model::new_id());
+    store.save_conversation(key, &c)?;
+    Ok(c)
+}
+
+fn new_service_korero(id: String) -> Conversation {
     let t = model::now();
-    let c = Conversation {
-        id: model::new_id(),
+    Conversation {
+        id,
         title: "Claude Code · all sessions".into(),
         classification: Classification::Noa,
         created_at: t,
@@ -509,9 +529,7 @@ fn service_korero(store: &Store, key: &DataKey, known: Option<&str>) -> Result<C
             session_id: None,
             mode: SERVICE_MODE.into(),
         }),
-    };
-    store.save_conversation(key, &c)?;
-    Ok(c)
+    }
 }
 
 /// `pataka service install`
@@ -1049,6 +1067,25 @@ mod tests {
             mail: false,
             connectors_off: false,
         }
+    }
+
+    #[test]
+    fn unlock_recreates_a_deleted_service_korero() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        let key = store
+            .initialise(KeyMode::Passphrase, Some("correct horse battery"))
+            .unwrap();
+        let id = service_korero(&store, &key, None).unwrap().id;
+        // Deleted in the desktop app while service.json still names it.
+        store.delete_conversation(&id).unwrap();
+        let host = ServiceHost::new(store.clone(), id.clone());
+        host.unlock("correct horse battery").unwrap();
+        assert!(!host.is_locked());
+        let c = store.load_conversation(&key, &id).unwrap();
+        assert_eq!(c.agent.unwrap().mode, SERVICE_MODE);
+        // Other kōrero are not conjured up.
+        assert!(host.context(&model::new_id()).is_err());
     }
 
     #[test]
