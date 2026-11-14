@@ -35,10 +35,23 @@ const PARTICLES: [&str; 10] = ["de", "del", "della", "der", "di", "du", "da", "v
 /// Titles that are not part of a name.
 const TITLES: [&str; 8] = ["dr", "prof", "professor", "mr", "mrs", "ms", "miss", "mx"];
 
+/// A hyphen at the end of a line inside a word: `Li-⏎son`. The next line
+/// may be indented or start with a blanked line number.
+static LINE_BREAK_HYPHEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\p{Ll})-[ \t]*\n[ \t]*(\p{Ll})").expect("pattern compiles"));
+
+/// `Li-⏎son` → `Lison`: a word a line break split with a hyphen, joined.
+/// A hyphen before a capital (`Rodriguez-⏎Lonebear`) is part of the name
+/// and stays.
+fn unbreak(s: &str) -> std::borrow::Cow<'_, str> {
+    LINE_BREAK_HYPHEN.replace_all(s, "$1$2")
+}
+
 /// Split a written name. `None` when it does not look like a name: no
 /// letters, digits or `@` in it, or too many words.
 pub fn parse(written: &str) -> Option<Name> {
-    let s = written
+    let joined = unbreak(written);
+    let s = joined
         .trim()
         .trim_matches(|c: char| matches!(c, '"' | '\'' | '’' | '`' | '(' | ')' | ',' | ';' | ':'));
     if s.is_empty() || s.len() > 100 || s.contains('@') || s.chars().any(|c| c.is_ascii_digit()) {
@@ -206,10 +219,33 @@ pub fn is_public(written: &str, public: &[String]) -> bool {
     let Some(name) = parse(written) else {
         return false;
     };
-    public
+    let whole = public
         .iter()
         .filter_map(|p| parse(p))
-        .any(|p| (!p.given.is_empty() || name.given.is_empty()) && compatible(&p, &name))
+        .any(|p| (!p.given.is_empty() || name.given.is_empty()) && compatible(&p, &name));
+    whole || public_compound(written, public)
+}
+
+/// A hyphenated name of a work that starts with a public name, the rest
+/// public names, acronyms or lowercase modifiers: `Tuaki-EN`, `Tuaki-en`,
+/// `Tuaki-v1` when `Tuaki` is public. A hyphenated personal name
+/// capitalises each part, so `Tuaki-Hemi` needs both parts public.
+fn public_compound(written: &str, public: &[String]) -> bool {
+    let word = written.trim().trim_matches(|c: char| !c.is_alphanumeric());
+    if word.contains(char::is_whitespace) || !word.contains('-') {
+        return false;
+    }
+    let parts: Vec<&str> = word.split('-').collect();
+    let modifier = |p: &str| {
+        let acronym =
+            (1..=5).contains(&p.chars().count()) && p.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+        let lowercase = p.chars().all(|c| c.is_lowercase() || c.is_ascii_digit());
+        acronym || lowercase
+    };
+    parts.iter().all(|p| !p.is_empty())
+        && !modifier(parts[0])
+        && is_public(parts[0], public)
+        && parts[1..].iter().all(|p| modifier(p) || is_public(p, public))
 }
 
 /// A surname as papers write it: capitalised, perhaps with a particle
@@ -274,6 +310,85 @@ static FULL_NAME: LazyLock<Regex> = LazyLock::new(|| {
         .expect("pattern compiles")
 });
 
+/// A one-word name a reference defines in parentheses: `(Philter)`, `(TAB)`.
+static REF_PAREN_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\((\p{Lu}[\p{L}\p{M}.-]*)\)").expect("pattern compiles"));
+/// A one-word name heading a title before its colon, just after the year
+/// (`(2025). Nemotron-PII: …`) or an opening quote (`“Casper: …`).
+static REF_TITLE_HEAD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?:\)\.\s+|[“"])(\p{Lu}[\p{L}\p{M}.'’-]*):\s"#).expect("pattern compiles"));
+/// An organisation heading a reference entry: `Gretel AI (2024).`,
+/// `Hugging Face (n.d.).`.
+static REF_ORG_HEAD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?m)^[ \t]*(\p{{Lu}}[\p{{L}}\p{{M}}]*(?:[ \t]+[\p{{L}}\p{{M}}]+){{0,4}})[ \t]+\((?:{YEAR}|n\.d\.)\)\."
+    ))
+    .expect("pattern compiles")
+});
+/// Words that end an organisation's name without naming it: `Gretel AI`
+/// is written `Gretel` too.
+const ORG_SUFFIXES: [&str; 17] = [
+    "ai",
+    "inc",
+    "ltd",
+    "llc",
+    "labs",
+    "lab",
+    "corp",
+    "corporation",
+    "foundation",
+    "institute",
+    "group",
+    "research",
+    "team",
+    "network",
+    "developers",
+    "project",
+    "company",
+];
+/// Words in parentheses in a reference that are not names.
+const NOT_WORK_NAMES: [&str; 6] = ["ed", "eds", "vol", "online", "preprint", "forthcoming"];
+
+/// Names of works and organisations a reference list gives: a system named
+/// in parentheses or before a title's colon (with the parts of a hyphenated
+/// one: `Nemotron-PII` gives `Nemotron`), and an organisation author with
+/// and without a suffix such as `AI`. Only one-word names, so a phrase in a
+/// title does not make its words public.
+fn work_names(refs: &str, cited: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut add = |w: &str| {
+        let w = w.trim_end_matches('.');
+        if w.chars().count() > 1 && !NOT_WORK_NAMES.contains(&fold(w).as_str()) {
+            out.push(w.to_string());
+            if w.contains('-') {
+                // The parts that are words, not acronyms.
+                for part in w.split('-').filter(|p| p.chars().any(char::is_lowercase)) {
+                    out.push(part.to_string());
+                }
+            }
+        }
+    };
+    for c in REF_PAREN_NAME.captures_iter(refs) {
+        add(&c[1]);
+    }
+    for c in REF_TITLE_HEAD.captures_iter(refs) {
+        add(&c[1]);
+    }
+    let orgs: Vec<String> = REF_ORG_HEAD
+        .captures_iter(refs)
+        .map(|c| c[1].to_string())
+        .chain(cited.iter().cloned())
+        .collect();
+    for org in orgs {
+        let words: Vec<&str> = org.split_whitespace().collect();
+        if words.len() >= 2 && ORG_SUFFIXES.contains(&fold(words[words.len() - 1]).as_str()) {
+            out.push(org.clone());
+            out.push(words[..words.len() - 1].join(" "));
+        }
+    }
+    out
+}
+
 /// Surnames in a list of cited names: `Rocher, Hendrickx and de Montjoye et al.`.
 fn split_surnames(names: &str) -> Vec<String> {
     let cut = names.trim().trim_end_matches('.');
@@ -300,6 +415,8 @@ pub fn byline_end(text: &str) -> Option<usize> {
 /// reference number (`(Sweeney, 2002)`, `Rocher et al. [12]`). Names in
 /// prose, acknowledgements or quotes are not citations and are not found.
 pub fn cited_names(text: &str) -> Vec<String> {
+    // `(Li-⏎son et al., 2020)`: a surname a line break split.
+    let text = &*unbreak(text);
     let mut out: Vec<String> = Vec::new();
     let mut push = |name: String| {
         let n = name.trim().trim_end_matches(',').trim().to_string();
@@ -337,6 +454,13 @@ pub fn cited_names(text: &str) -> Vec<String> {
                 }
             }
         }
+        let cited = out.clone();
+        let mut push = |name: String| {
+            if parse(&name).is_some() && !NOT_SURNAMES.contains(&fold(&name).as_str()) && !out.contains(&name) {
+                out.push(name);
+            }
+        };
+        work_names(refs, &cited).into_iter().for_each(&mut push);
     }
     out
 }
@@ -443,6 +567,40 @@ mod tests {
         let end = byline_end(paper).unwrap();
         assert!(paper[..end].contains("Latanya"));
         assert!(byline_end("Kia ora,\nHe pātai tāku.").is_none());
+    }
+
+    #[test]
+    fn a_reference_list_names_the_works_and_organisations_it_cites() {
+        let text = "Kerebot argued for recall (Moana et al., 2020). We use 10,000 Tuaki documents \
+            (Tuaki Labs, 2024). Tuaki lists entities. Also Pounamu-PII (Rangi et al., 2025).\n\n\
+            References\n\
+            Moana, A., & Rangi, B. (2020). A clinical filter (Kerebot): accurate notes. npj, 3(1), 57.\n\
+            Rangi, B. (2025). Pounamu-PII: Synthesized data for privacy. Hugging Face dataset.\n\
+            Tuaki Labs (2024). A masking dataset. Apache License 2.0.\n\
+            Wai, C. (2019). Behind the mask: Demographic bias. In Proceedings (Eds.), pp. 1–9.\n";
+        let names = cited_names(text);
+        for n in ["Kerebot", "Pounamu-PII", "Pounamu", "Tuaki Labs", "Tuaki"] {
+            assert!(names.iter().any(|x| x == n), "{n} missing from {names:?}");
+        }
+        for n in ["Behind", "Eds", "A"] {
+            assert!(!names.iter().any(|x| x == n), "{n} should not be public: {names:?}");
+        }
+        assert!(is_public("Tuaki-EN", &names), "an organisation name with an acronym");
+        assert!(is_public("Tuaki-en", &names), "with a lowercase modifier");
+        assert!(!is_public("Tuaki-Hemi", &names), "a part that is not public");
+        assert!(!is_public("Hemi-Tuaki", &names), "a public name that does not lead");
+        assert!(!is_public("Aroha Tuaki", &names), "a person who shares the name");
+    }
+
+    #[test]
+    fn a_name_split_by_a_line_break_hyphen_is_one_name() {
+        let text = "Weak labels help (Li-\nson et al., 2020; Rodriguez-\nLonebear, 2016).";
+        let names = cited_names(text);
+        assert!(names.iter().any(|x| x == "Lison"), "{names:?}");
+        assert!(is_public("Li-\nson", &names));
+        assert!(is_public("Li-\n     son", &names), "an indented next line");
+        // A hyphen before a capital is part of the name.
+        assert_eq!(unbreak("Rodriguez-\nLonebear"), "Rodriguez-\nLonebear");
     }
 
     #[test]
