@@ -11,6 +11,7 @@
 //!   label references, never subjects, addresses or text, and can be undone
 //!   with `pataka mail undo <entry>`.
 
+pub mod compose;
 pub mod imap;
 pub mod mcp;
 pub mod ops;

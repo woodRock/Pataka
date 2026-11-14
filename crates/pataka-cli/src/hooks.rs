@@ -268,10 +268,58 @@ fn allowed_by_rule(tool: &str, files: &[PathBuf]) -> bool {
     rules("allow").iter().any(|r| matches(r)) && !deny_or_ask.iter().any(|r| matches(r))
 }
 
+/// The file paths a draft names, with any placeholders put back by the
+/// session's service, so the guard judges where the files really are. If
+/// the service cannot answer they stay as written (and so look outside the
+/// folder, which asks).
+fn restore_draft_paths(tool_input: &mut Value) {
+    const KEYS: [&str; 3] = ["from_json", "poster_image", "attachments"];
+    let paths = json!({
+        "from_json": tool_input["from_json"],
+        "poster_image": tool_input["poster_image"],
+        "attachments": tool_input["attachments"],
+    });
+    if !may_hold_placeholder(&paths.to_string()) {
+        return;
+    }
+    let Some(url) = restore_url() else { return };
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return;
+    };
+    let restored: Option<Value> = rt.block_on(async {
+        let r = reqwest::Client::new()
+            .post(&url)
+            .json(&json!({"value": paths}))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        r.json::<Value>().await.ok().map(|v| v["value"].clone())
+    });
+    if let Some(v) = restored.filter(|v| v.is_object()) {
+        for k in KEYS {
+            if !v[k].is_null() {
+                tool_input[k] = v[k].clone();
+            }
+        }
+    }
+}
+
 fn mail_decision_with(input: &Value, allowed: bool) -> Option<Value> {
     let tool = input["tool_name"].as_str().unwrap_or("");
     let strict = defers_to_session(input) && !allowed;
-    let reason = guards::review_mail(tool, &input["tool_input"], strict)?;
+    let cwd = input["cwd"]
+        .as_str()
+        .map(PathBuf::from)
+        .map(|c| c.canonicalize().unwrap_or(c));
+    let mut tool_input = input["tool_input"].clone();
+    if tool.ends_with("__draft") {
+        restore_draft_paths(&mut tool_input);
+    }
+    let reason = guards::review_mail(tool, &tool_input, strict, cwd.as_deref())?;
     let mode = input["permission_mode"].as_str().unwrap_or("");
     let (decision, text) = if matches!(mode, "bypassPermissions" | "dontAsk") {
         (

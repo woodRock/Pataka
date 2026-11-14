@@ -98,14 +98,17 @@ pub fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
          "annotations": {"title": "Create label", "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}},
         {"name": "draft",
-         "description": "Save a plain-text draft in Drafts for the user to review and send. It is never sent. With reply_to (a message id) it joins that message's thread.",
+         "description": "Save a draft in Drafts for the user to review and send. It is never sent. The body is plain text, with body_html as an HTML version; files can be attached (a .ics goes as a calendar invite) and poster_image is shown inline where body_html has <!-- POSTER -->. to may be empty: the user fills it in. File paths must be full paths; files outside the project folder need the user's approval. from_json reads all of this from an email.json (its paths relative to its repository); arguments given as well take precedence. With reply_to (a message id) it joins that message's thread.",
          "inputSchema": {"type": "object", "properties": {
-             "to": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+             "to": {"type": "array", "items": {"type": "string"}, "description": "Recipients; may be empty"},
              "cc": {"type": "array", "items": {"type": "string"}},
              "subject": {"type": "string"},
-             "body": {"type": "string"},
-             "reply_to": {"type": "string", "description": "Message id this replies to"}},
-             "required": ["to", "body"]},
+             "body": {"type": "string", "description": "Plain-text body (made from body_html if left out)"},
+             "body_html": {"type": "string", "description": "HTML body, sent alongside the plain text"},
+             "attachments": {"type": "array", "items": {"type": "string"}, "description": "Full paths of files to attach, e.g. a poster.pdf and an event.ics"},
+             "poster_image": {"type": "string", "description": "Full path of an image to show inline in place of <!-- POSTER --> in body_html"},
+             "from_json": {"type": "string", "description": "Full path of an email.json with to, cc, subject, body, body_html, attachments and poster_image"},
+             "reply_to": {"type": "string", "description": "Message id this replies to"}}},
          "annotations": {"title": "Save a draft", "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}},
         {"name": "trash",
          "description": "Move messages to the Trash. The user is always asked first.",
@@ -192,16 +195,21 @@ async fn run(m: &mut Mailer, ctx: &McpContext, from: &str, name: &str, a: &Value
                 .await?,
         ),
         "draft" => {
+            let spec = super::compose::resolve(a)?;
+            let (files, poster) = super::compose::load(&spec)?;
             let (r, t) = m
                 .draft(
                     v,
                     from,
                     super::ops::DraftRequest {
-                        to: &strings(&a["to"]),
-                        cc: &strings(&a["cc"]),
-                        subject: a["subject"].as_str().unwrap_or(""),
-                        body: a["body"].as_str().unwrap_or(""),
-                        reply_to: a["reply_to"].as_str(),
+                        to: &spec.to,
+                        cc: &spec.cc,
+                        subject: &spec.subject,
+                        body: &spec.body,
+                        body_html: spec.body_html.as_deref(),
+                        attachments: &files,
+                        poster: poster.as_ref(),
+                        reply_to: spec.reply_to.as_deref(),
                     },
                 )
                 .await?;

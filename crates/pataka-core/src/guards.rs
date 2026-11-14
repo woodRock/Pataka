@@ -160,6 +160,15 @@ pub fn review_command(command: &str, workspace: &Path) -> Option<String> {
     None
 }
 
+/// Is a file a tool will read outside `workspace`? An absolute path that
+/// exists is judged by where it really is, so a symlink cannot lead out.
+fn far_from(path: &str, workspace: &Path) -> bool {
+    match Path::new(path).canonicalize() {
+        Ok(real) if Path::new(path).is_absolute() => !real.starts_with(workspace),
+        _ => outside(path, workspace),
+    }
+}
+
 /// Mail changes touching more than this many messages always ask.
 pub const MAIL_BULK: usize = 25;
 
@@ -179,10 +188,24 @@ pub fn is_mail_mutation(tool: &str) -> bool {
 /// `strict` (auto mode, where nobody else would ask), always: email is
 /// untrusted input that can carry instructions aimed at Claude, so every
 /// change needs the person's explicit yes there.
-pub fn review_mail(tool: &str, input: &Value, strict: bool) -> Option<String> {
+///
+/// A draft that attaches a file (or reads an `email.json`) outside
+/// `workspace` always asks, naming the file; with no workspace known, any
+/// file asks.
+pub fn review_mail(tool: &str, input: &Value, strict: bool, workspace: Option<&Path>) -> Option<String> {
     let name = mail_tool(tool)?;
     if crate::mail::mcp::READ_TOOLS.contains(&name) {
         return None;
+    }
+    if name == "draft" {
+        let far = crate::mail::compose::draft_paths(input)
+            .into_iter()
+            .find(|p| workspace.is_none_or(|w| far_from(p, w)));
+        if let Some(p) = far {
+            return Some(format!(
+                "this saves a draft email with a file from outside the project folder ({p}); it is not sent"
+            ));
+        }
     }
     let n = input["ids"].as_array().map(|a| a.len()).unwrap_or(0);
     let emails = if n == 1 {
@@ -213,7 +236,7 @@ pub fn review_mail(tool: &str, input: &Value, strict: bool) -> Option<String> {
 /// Pātaka Mail change asks.
 pub fn review_tool_auto(tool: &str, input: &Value, workspace: &Path) -> Option<String> {
     if mail_tool(tool).is_some() {
-        return review_mail(tool, input, true);
+        return review_mail(tool, input, true, Some(workspace));
     }
     review_tool(tool, input, workspace)
 }
@@ -222,7 +245,7 @@ pub fn review_tool_auto(tool: &str, input: &Value, workspace: &Path) -> Option<S
 /// have no objection).
 pub fn review_tool(tool: &str, input: &Value, workspace: &Path) -> Option<String> {
     if mail_tool(tool).is_some() {
-        return review_mail(tool, input, false);
+        return review_mail(tool, input, false, Some(workspace));
     }
     if tool.starts_with("mcp__") {
         return Some("it sends data to an MCP server".into());
@@ -339,6 +362,50 @@ mod tests {
     fn trash_always_asks() {
         let r = review_tool("mcp__pataka-mail__trash", &json!({"ids": ids(1)}), &ws());
         assert_eq!(r.as_deref(), Some("this moves 1 email to the Trash"));
+    }
+
+    #[test]
+    fn drafts_with_files_outside_the_folder_ask() {
+        let draft = "mcp__pataka-mail__draft";
+        let inside = json!({"body": "x", "attachments": ["/home/kaiako/project/talk/poster.pdf"],
+                            "poster_image": "/home/kaiako/project/talk/poster.png"});
+        assert!(
+            review_tool(draft, &inside, &ws()).is_none(),
+            "files in the project need no yes"
+        );
+        for far in [
+            json!({"body": "x", "attachments": ["/home/kaiako/project/a.pdf", "/home/kaiako/.ssh/id_ed25519"]}),
+            json!({"body": "x", "poster_image": "/etc/hosts"}),
+            json!({"from_json": "/home/kaiako/other/email.json"}),
+            json!({"body": "x", "attachments": ["/home/kaiako/project/../secrets.pdf"]}),
+        ] {
+            let why = review_tool(draft, &far, &ws()).unwrap_or_default();
+            assert!(why.contains("outside the project folder"), "{far}: {why}");
+        }
+        // With no folder known, any file asks; a plain draft does not.
+        assert!(review_mail(draft, &inside, false, None).is_some());
+        assert!(review_mail(draft, &json!({"body": "x"}), false, None).is_none());
+    }
+
+    #[test]
+    fn a_symlink_cannot_lead_a_draft_out_of_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(root.join("secret.txt"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("secret.txt"), project.join("link.txt")).unwrap();
+        #[cfg(unix)]
+        {
+            let link = project.join("link.txt").display().to_string();
+            let why = review_tool(
+                "mcp__pataka-mail__draft",
+                &json!({"body": "x", "attachments": [link]}),
+                &project,
+            );
+            assert!(why.is_some_and(|w| w.contains("outside the project folder")));
+        }
     }
 
     #[test]
