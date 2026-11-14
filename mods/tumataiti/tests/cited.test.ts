@@ -73,6 +73,8 @@ test('shown cited authors are stored in the clear, after one question', async ($
   expect(storedText(session, 1)).toBe('Sweeney again.')
   expect(asked.length).toBe(1)
   expect(asked[0]).toContain('published author')
+  // It names where the text came from (here the tool, as the row's origin says).
+  expect(asked[0]).toContain('The Read result names 1 published author')
   expect(calls).toEqual(['redact', 'cited-authors:true', 'redact', 'redact'])
 })
 

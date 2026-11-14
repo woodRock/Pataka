@@ -404,8 +404,12 @@ fn split_surnames(names: &str) -> Vec<String> {
 /// top. Names before it are the paper's authors. `None` when the text does
 /// not open like a paper.
 pub fn byline_end(text: &str) -> Option<usize> {
-    let head = &text[..text.len().min(3000)];
-    let head = &head[..(0..=head.len()).rev().find(|&i| head.is_char_boundary(i)).unwrap_or(0)];
+    // Cut at or before byte 3000, never inside a character (`—`, `ā`).
+    let cut = (0..=text.len().min(3000))
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0);
+    let head = &text[..cut];
     ABSTRACT_HEADING.find(head).map(|m| m.start()).filter(|&i| i > 0)
 }
 
@@ -559,6 +563,14 @@ mod tests {
         let public = vec!["Sweeney, L.".to_string()];
         assert!(is_public("Latanya Sweeney", &public));
         assert!(is_public("Sweeney", &public));
+    }
+
+    #[test]
+    fn a_long_text_with_a_character_across_byte_3000_does_not_panic() {
+        for pad in 2997..=3000 {
+            let text = format!("{}— ā … and more\nAbstract\n", "x".repeat(pad));
+            assert!(byline_end(&text).is_none());
+        }
     }
 
     #[test]
