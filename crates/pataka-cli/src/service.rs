@@ -308,7 +308,7 @@ impl Host for ServiceHost {
     }
 
     fn status(&self) -> Value {
-        json!({"locked": self.is_locked(), "korero": self.korero, "version": env!("CARGO_PKG_VERSION")})
+        json!({"locked": self.is_locked(), "korero": self.korero, "version": env!("CARGO_PKG_VERSION"), "pid": std::process::id()})
     }
 
     fn unlock(&self, passphrase: &str) -> Result<()> {
@@ -815,6 +815,63 @@ pub fn uninstall() -> Result<i32> {
 }
 
 /// `pataka service start|stop`
+/// `pataka service restart`: start the service again on the installed
+/// binary (after a rebuild), wait until the new process answers, and unlock
+/// it. launchd waits up to `ThrottleInterval` (10 s) before starting the job
+/// again, and a restarted service is locked, so without the wait and the
+/// unlock a restart looks like it did nothing.
+pub fn restart(unlock_after: bool) -> Result<i32> {
+    let store = ctx::store()?;
+    let cfg = need_config(&store)?;
+    let pid_of = |v: &Value| v["pid"].as_u64();
+    let old = block_on(call(&cfg, reqwest::Method::GET, "status", None))
+        .ok()
+        .and_then(|(_, v)| pid_of(&v));
+    autostart::restart()?;
+    println!("Restarting the Pātaka service (this can take about 10 seconds)…");
+    let mut back: Option<Value> = None;
+    for _ in 0..120 {
+        if let Ok((200, v)) = block_on(call(&cfg, reqwest::Method::GET, "status", None)) {
+            // A different process: an older service reports no pid at all.
+            if pid_of(&v).is_some() && pid_of(&v) != old {
+                back = Some(v);
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let Some(v) = back else {
+        return Err(Error::Invalid(format!(
+            "The service did not come back within 30 seconds. See {}.",
+            autostart::log_path(&store).display()
+        )));
+    };
+    println!(
+        "The Pātaka service restarted (process {}).",
+        pid_of(&v).unwrap_or_default()
+    );
+    if v["locked"] != true {
+        return Ok(0);
+    }
+    if !unlock_after {
+        println!("It is locked: run `pataka unlock`.");
+        return Ok(0);
+    }
+    let pass = match store.key_mode()? {
+        Some(KeyMode::Passphrase) => match ctx::prompt_secret("Pātaka passphrase: ") {
+            Ok(p) => p,
+            Err(_) => {
+                println!("It is locked: run `pataka unlock`.");
+                return Ok(0);
+            }
+        },
+        _ => Zeroizing::new(String::new()),
+    };
+    send_unlock(&cfg, &pass)?;
+    println!("Pātaka is unlocked. Claude Code sessions go through Tūmataiti again.");
+    Ok(0)
+}
+
 pub fn start_stop(start: bool) -> Result<i32> {
     let store = ctx::store()?;
     let cfg = need_config(&store)?;
@@ -979,6 +1036,19 @@ mod autostart {
         }
         Ok(())
     }
+    /// Kill the running service and start it again from the plist's binary.
+    #[cfg(target_os = "macos")]
+    pub fn restart() -> Result<()> {
+        let path = plist_path().filter(|p| p.exists()).ok_or_else(|| {
+            Error::Invalid("The service is not set to start at login. Run `pataka service install`.".into())
+        })?;
+        if !run("launchctl", &["kickstart", "-k", &format!("{}/{LABEL}", domain())])
+            && !run("launchctl", &["bootstrap", &domain(), &path.display().to_string()])
+        {
+            return Err(Error::Invalid("launchctl could not restart the service.".into()));
+        }
+        Ok(())
+    }
     #[cfg(target_os = "macos")]
     pub fn stop() {
         let _ = run("launchctl", &["bootout", &format!("{}/{LABEL}", domain())]);
@@ -1016,6 +1086,15 @@ mod autostart {
         Ok(())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn restart() -> Result<()> {
+        if !run("systemctl", &["--user", "restart", "pataka.service"]) {
+            return Err(Error::Invalid(
+                "systemctl --user could not restart pataka.service".into(),
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     pub fn stop() {
         run("systemctl", &["--user", "stop", "pataka.service"]);
     }
@@ -1041,6 +1120,10 @@ mod autostart {
         Err(Error::Invalid(
             "Starting the service is not automated on Windows yet: run `pataka serve`.".into(),
         ))
+    }
+    #[cfg(not(unix))]
+    pub fn restart() -> Result<()> {
+        start()
     }
     #[cfg(not(unix))]
     pub fn stop() {}
@@ -1214,6 +1297,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(st["locked"], true);
+        // `pataka service restart` tells the new process from the old by this.
+        assert_eq!(st["pid"], std::process::id());
 
         // A wrong passphrase does not unlock.
         let r = http

@@ -105,6 +105,13 @@ enum ServiceCmd {
     /// Is it running, unlocked, and is Claude Code pointed at it?
     Status,
     Start,
+    /// Restart the service on the installed binary (after a rebuild), wait
+    /// until it is back, and unlock it.
+    Restart {
+        /// Leave it locked; unlock later with `pataka unlock`.
+        #[arg(long)]
+        no_unlock: bool,
+    },
     Stop,
 }
 
@@ -208,6 +215,7 @@ pub fn run() -> i32 {
             ServiceCmd::Uninstall => service::uninstall(),
             ServiceCmd::Status => service::status(),
             ServiceCmd::Start => service::start_stop(true),
+            ServiceCmd::Restart { no_unlock } => service::restart(!no_unlock),
             ServiceCmd::Stop => service::start_stop(false),
         },
         Cmd::Serve => service::serve(),
