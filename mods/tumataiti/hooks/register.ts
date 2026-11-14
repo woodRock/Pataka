@@ -137,12 +137,22 @@ async function patakaCommand($: Dollar): Promise<string> {
  * or with nobody to ask, they stay hidden and nothing is recorded, so a
  * later session asks again.
  */
-async function askAboutCited($: Dollar, n: number): Promise<boolean> {
+async function askAboutCited($: Dollar, n: number, source: string | undefined): Promise<boolean> {
   if (citedDismissed) return false
+  // The question is shown only on this computer: real values may go in it.
+  let what = source ?? 'This text'
+  if (PLACEHOLDER.test(what)) {
+    try {
+      const { value } = await call<{ value: Json }>($, 'restore', { value: what })
+      if (typeof value === 'string') what = value
+    } catch {
+      // Shown with its placeholders.
+    }
+  }
   let answer: string
   try {
     answer = await $.ui.ask(
-      `This text names ${n} published author${n === 1 ? '' : 's'} in a byline, reference list or citations. Pātaka hides names by default. Show these authors' names to Claude?`,
+      `${what} names ${n} published author${n === 1 ? '' : 's'} in a byline, reference list or citations. Pātaka hides names by default. Show these authors' names to Claude?`,
       { header: 'Citations', options: [SHOW, HIDE, ALWAYS] },
     )
   } catch {
@@ -161,6 +171,41 @@ async function askAboutCited($: Dollar, n: number): Promise<boolean> {
     }
   }
   return show
+}
+
+/** Each tool call's tool and arguments, by tool_use_id, to name where a result came from. */
+const toolCalls = new Map<string, { tool: string; args: Record<string, unknown> }>()
+
+/** The arguments of a tool.call event, without the hook's own keys. */
+function argsOf(e: Record<string, unknown>): Record<string, unknown> {
+  const args: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(e)) if (!RESERVED.has(k)) args[k] = v
+  return args
+}
+
+/** A tool call in words: the file it read, the page it fetched, or the tool. */
+function describeCall(tool: string, args: Record<string, unknown>): string {
+  const path = args.file_path ?? args.notebook_path ?? args.path
+  if (typeof path === 'string' && path) return `"${path.split('/').pop()}"`
+  if (tool.startsWith('mcp__pataka-mail__')) return 'An email from Pātaka Mail'
+  if (typeof args.url === 'string' && args.url) return `"${args.url}"`
+  return `The ${tool} result`
+}
+
+/** Where a row's text came from: a document's title, else the tool call that produced it. */
+function sourceOf(blocks: Block[], tool: string | undefined): string | undefined {
+  for (const b of blocks) {
+    if (b.type === 'document' && typeof b.title === 'string' && b.title) return `"${b.title}"`
+    if (Array.isArray(b.content)) {
+      const inner = sourceOf(b.content as Block[], undefined)
+      if (inner) return inner
+    }
+    if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
+      const c = toolCalls.get(b.tool_use_id)
+      if (c) return describeCall(c.tool, c.args)
+    }
+  }
+  return tool ? describeCall(tool, {}) : undefined
 }
 
 async function redactTexts($: Dollar, texts: string[]): Promise<Redacted> {
@@ -249,6 +294,8 @@ export const register: Register = on => {
   // injected context. Only the redacted row is stored, so only it is sent.
   on('session.append', async ($, e, next) => {
     if (SKIP_DOORS.has(e.door) || e.message.type === 'system') return next(e)
+    const origin = (e as { origin?: { tool?: unknown } }).origin
+    const source = sourceOf(e.message.content as Block[], typeof origin?.tool === 'string' ? origin.tool : undefined)
     const content = await readableMedia($, e.message.content as Block[])
     const slots: { get: () => string; set: (s: string) => void }[] = []
     textSlots(content, slots)
@@ -256,7 +303,7 @@ export const register: Register = on => {
     const originals = slots.map(s => s.get())
     let r = await redactTexts($, originals)
     // Cited authors held back: ask once, and if they may go, check again.
-    if (!r.tapu && (r.citedAuthors ?? 0) > 0 && (await askAboutCited($, r.citedAuthors ?? 0))) {
+    if (!r.tapu && (r.citedAuthors ?? 0) > 0 && (await askAboutCited($, r.citedAuthors ?? 0, source))) {
       r = await redactTexts($, originals)
     }
     if (r.tapu) {
@@ -273,9 +320,12 @@ export const register: Register = on => {
   // Before a local tool runs, its arguments get the real values back. Network
   // and MCP tools keep the placeholders (Pātaka Mail restores its own).
   on('tool.call', async ($, e, next) => {
+    const args = argsOf(e as Record<string, unknown>)
+    if (typeof e.tool_use_id === 'string') {
+      if (toolCalls.size >= 500) toolCalls.clear()
+      toolCalls.set(e.tool_use_id, { tool: e.tool, args })
+    }
     if (!restoresInput(e.tool)) return next(e)
-    const args: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(e)) if (!RESERVED.has(k)) args[k] = v
     // Left exactly as written, so auto mode reviews what runs.
     if (e.tool === 'Bash' && runsThroughPataka(args)) return next(e)
     if (!PLACEHOLDER.test(JSON.stringify(args))) return next(e)

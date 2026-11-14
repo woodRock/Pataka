@@ -342,12 +342,33 @@ impl Redactor<'_> {
             add_note(system);
         }
         if let Some(Value::Array(messages)) = body.get_mut("messages") {
+            let mail_calls = mail_tool_calls(messages);
             for m in messages.iter_mut() {
                 // The model's own messages hold real placeholders; everything
                 // else is the person's text or their files'.
                 let escape = std::mem::replace(&mut self.escape, m["role"] != "assistant");
-                if let Some(c) = m.get_mut("content") {
-                    self.content(c);
+                match m.get_mut("content") {
+                    Some(Value::Array(blocks)) => {
+                        for b in blocks.iter_mut() {
+                            // Pātaka Mail results were redacted with this
+                            // kōrero's vault before Claude Code stored them
+                            // (`mail_mcp`), and anything in the email that
+                            // looked like a placeholder was escaped then. The
+                            // placeholders left in them are real: escaping them
+                            // again would turn every name into a literal the
+                            // person never gets back.
+                            let mail = b["type"] == "tool_result"
+                                && b["tool_use_id"].as_str().is_some_and(|id| mail_calls.contains(id));
+                            let outer = self.escape;
+                            if mail {
+                                self.escape = false;
+                            }
+                            self.block(b);
+                            self.escape = outer;
+                        }
+                    }
+                    Some(c) => self.content(c),
+                    None => {}
                 }
                 self.escape = escape;
             }
@@ -355,6 +376,19 @@ impl Redactor<'_> {
         // `tools` (definitions) and `metadata` carry no conversation text and
         // are left as they are.
     }
+}
+
+/// Ids of the model's `mcp__pataka-mail__*` tool calls in a request.
+fn mail_tool_calls(messages: &[Value]) -> std::collections::HashSet<String> {
+    messages
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .filter(|b| b["type"] == "tool_use")
+        .filter(|b| b["name"].as_str().is_some_and(|n| n.starts_with(crate::mail::TOOL_PREFIX)))
+        .filter_map(|b| b["id"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// Text of a PDF read on this computer is cut at this size; the agent can
@@ -723,6 +757,41 @@ mod tests {
             v.placeholders.insert(p.to_string(), o.to_string());
         }
         v
+    }
+
+    #[test]
+    fn mail_results_keep_their_placeholders() {
+        // Built at run time, so no placeholder is written in this file.
+        let ph = format!("[{}_1]", "PERSON");
+        let lit = format!("[literal {}_9]", "EMAIL");
+        let k = kaupapa();
+        let mut v = Vault::default();
+        v.placeholders.insert(ph.clone(), "Aroha".into());
+        let none = |_: &str| Vec::new();
+        let mut body = json!({"messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "m1", "name": "mcp__pataka-mail__search", "input": {"query": "in:inbox"}},
+                {"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "cat notes.txt"}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "m1", "content": format!("from: {ph}, text {lit}")},
+                {"type": "tool_result", "tool_use_id": "b1", "content": format!("notes: {ph}")}
+            ]}
+        ]});
+        let mut r = redactor(&k, &mut v, &none);
+        r.request(&mut body);
+        let results = &body["messages"][1]["content"];
+        assert_eq!(
+            results[0]["content"],
+            format!("from: {ph}, text {lit}"),
+            "mail results were redacted and escaped once already"
+        );
+        assert_eq!(
+            results[1]["content"],
+            format!("notes: [literal {}_1]", "PERSON"),
+            "other tool results are still escaped"
+        );
+        assert_eq!(redaction::restore(&format!("Reply to {ph}"), &v), "Reply to Aroha");
     }
 
     fn collect_text(out: &str) -> String {

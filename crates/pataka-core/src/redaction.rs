@@ -907,7 +907,11 @@ pub fn redact(
     // Authors a paper cites, and the paper's own byline: shown, hidden or
     // held until the person says, as the kaupapa sets.
     let mut cited = crate::authors::cited_names(text);
-    if let Some(end) = crate::authors::byline_end(text) {
+    // A byline counts only in a text that cites published work. An email or
+    // a seminar notice with a "Summary" or "Abstract" line near the top is
+    // not a paper, and the people writing it are not published authors.
+    let cites = !cited.is_empty() || crate::authors::references_start(text).is_some();
+    if let Some(end) = crate::authors::byline_end(text).filter(|_| cites) {
         for s in spans.iter().filter(|s| s.category == Category::Person && s.end <= end) {
             if s.source != Source::Gazetteer || s.detector == "known_value" {
                 cited.push(s.text.clone());
@@ -1727,6 +1731,16 @@ mod cited_author_tests {
         let out = redact(PAPER, &kaupapa(CitedAuthors::Hide), &[], &[], &spans(), &mut v).output;
         assert!(!out.contains("Sweeney") && !out.contains("Kereama"), "{out}");
         assert_eq!(v.cited_question(), 0);
+    }
+
+    #[test]
+    fn an_email_with_a_summary_line_asks_nothing() {
+        let email = "From: Zed Quorvex\nTo: Yul Brimmond\nSubject: Seminar\n\nSummary\nThe talk is on Friday.\n";
+        let spans = vec![person(email, "Zed Quorvex"), person(email, "Yul Brimmond")];
+        let mut v = Vault::default();
+        let out = redact(email, &kaupapa(CitedAuthors::Ask), &[], &[], &spans, &mut v).output;
+        assert_eq!(v.cited_question(), 0, "{out}");
+        assert!(!out.contains("Quorvex") && !out.contains("Brimmond"), "{out}");
     }
 
     #[test]
