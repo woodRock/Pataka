@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use mail_parser::{MessageParser, MimeHeaders};
 
+use super::compose;
 use super::imap::{self, astring, mailbox, uid_set, Fetched, Imap, Part, Tok};
 use super::{Account, Drafted, FlagChange, LabelChange, MailVault, Moved, Record};
 use crate::error::{Error, Result};
@@ -800,6 +801,12 @@ pub struct DraftRequest<'a> {
     pub cc: &'a [String],
     pub subject: &'a str,
     pub body: &'a str,
+    /// An HTML version of the body, shown by mail apps that show HTML.
+    pub body_html: Option<&'a str>,
+    /// Files to attach.
+    pub attachments: &'a [compose::File],
+    /// An image shown inline where `body_html` has `<!-- POSTER -->`.
+    pub poster: Option<&'a compose::File>,
     /// The message id this replies to.
     pub reply_to: Option<&'a str>,
 }
@@ -811,19 +818,23 @@ pub struct DraftText<'a> {
     pub cc: &'a [String],
     pub subject: &'a str,
     pub body: &'a str,
+    pub body_html: Option<&'a str>,
+    pub attachments: &'a [compose::File],
+    pub poster: Option<&'a compose::File>,
     /// Message-ID and References of the message this replies to.
     pub in_reply_to: Option<(String, String)>,
 }
 
-/// A plain-text RFC 5322 message for the Drafts folder.
+/// An RFC 5322 message for the Drafts folder: plain text, or text and HTML,
+/// with any files attached. It may have no recipients yet: the person fills
+/// them in before sending.
 pub fn draft_message(d: &DraftText) -> Result<Vec<u8>> {
-    use base64::Engine;
-    if d.to.is_empty() {
-        return Err(Error::Invalid("Say who the draft is to.".into()));
-    }
     let list =
         |v: &[String]| -> Result<String> { Ok(v.iter().map(|a| address(a)).collect::<Result<Vec<_>>>()?.join(", ")) };
-    let mut h = format!("From: {}\r\nTo: {}\r\n", address(d.from)?, list(d.to)?);
+    let mut h = format!("From: {}\r\n", address(d.from)?);
+    if !d.to.is_empty() {
+        h.push_str(&format!("To: {}\r\n", list(d.to)?));
+    }
     if !d.cc.is_empty() {
         h.push_str(&format!("Cc: {}\r\n", list(d.cc)?));
     }
@@ -839,16 +850,9 @@ pub fn draft_message(d: &DraftText) -> Result<Vec<u8>> {
             header_text(refs)
         ));
     }
-    h.push_str(
-        "MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n",
-    );
-    let body = d.body.replace("\r\n", "\n").replace('\n', "\r\n");
-    let b64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
+    h.push_str("MIME-Version: 1.0\r\n");
     let mut out = h.into_bytes();
-    for chunk in b64.as_bytes().chunks(76) {
-        out.extend_from_slice(chunk);
-        out.extend_from_slice(b"\r\n");
-    }
+    out.extend(compose::mime_body(d.body, d.body_html, d.attachments, d.poster)?);
     Ok(out)
 }
 
@@ -1779,8 +1783,14 @@ impl Mailer {
             cc,
             subject,
             body,
+            body_html,
+            attachments,
+            poster,
             reply_to,
         } = req;
+        if body.trim().is_empty() && body_html.is_none_or(|h| h.trim().is_empty()) {
+            return Err(Error::Invalid("Give the draft a body (body or body_html).".into()));
+        }
         let drafts = self
             .special("\\Drafts", "Drafts")
             .ok_or_else(|| Error::NotFound("a Drafts folder on this server".into()))?;
@@ -1837,6 +1847,9 @@ impl Mailer {
             cc,
             subject: &subject,
             body,
+            body_html,
+            attachments,
+            poster,
             in_reply_to,
         })?;
         let parts = vec![
@@ -1857,10 +1870,30 @@ impl Mailer {
             }),
             ..Default::default()
         };
-        Ok((
-            record,
-            "Saved a draft in Drafts. It has not been sent: the user reviews and sends it.".into(),
-        ))
+        let mut said = String::from("Saved a draft in Drafts");
+        if body_html.is_some_and(|h| !h.trim().is_empty()) {
+            said.push_str(" with an HTML body");
+        }
+        let files: Vec<String> = attachments
+            .iter()
+            .map(|f| format!("{} ({})", f.name, size_text(f.data.len())))
+            .collect();
+        if !files.is_empty() {
+            said.push_str(&format!(", attaching {}", files.join(", ")));
+        }
+        if let Some(p) = poster {
+            let shown = body_html.is_some_and(|h| h.contains(compose::POSTER_MARKER));
+            said.push_str(&format!(
+                ", with {} {}",
+                p.name,
+                if shown { "shown inline" } else { "attached" }
+            ));
+        }
+        if to.is_empty() {
+            said.push_str(". It has no recipients yet");
+        }
+        said.push_str(". It has not been sent: the user reviews and sends it.");
+        Ok((record, said))
     }
 
     // ------------------------------------------------------------ undo

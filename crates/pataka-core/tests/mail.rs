@@ -885,6 +885,9 @@ async fn threads_drafts_and_nested_labels() {
                 to: &[BOSS.to_string()],
                 cc: &[],
                 subject: "",
+                body_html: None,
+                attachments: &[],
+                poster: None,
                 body: "Kia ora Kahu, I'll send the signed copy tomorrow.",
                 reply_to: Some(&boss_id),
             },
@@ -908,6 +911,46 @@ async fn threads_drafts_and_nested_labels() {
         imap.lock().unwrap().msgs.last().unwrap().trash,
         "undo moves the draft to the Trash"
     );
+
+    // A full email: no recipients yet, HTML with the poster inline, a calendar file.
+    let poster = pataka_core::mail::compose::File {
+        name: "poster.png".into(),
+        mime: "image/png".into(),
+        data: b"png".to_vec(),
+    };
+    let ics = pataka_core::mail::compose::File {
+        name: "event.ics".into(),
+        mime: "text/calendar".into(),
+        data: b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".to_vec(),
+    };
+    let me = ["me", "example.nz"].join("@");
+    let (_, text) = m
+        .draft(
+            &vault,
+            &me,
+            DraftRequest {
+                to: &[],
+                cc: &[],
+                subject: "Talk on Friday",
+                body: "",
+                body_html: Some("<p>Come along</p><!-- POSTER -->"),
+                attachments: std::slice::from_ref(&ics),
+                poster: Some(&poster),
+                reply_to: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        text.contains("event.ics") && text.contains("shown inline") && text.contains("no recipients"),
+        "{text}"
+    );
+    let saved = imap.lock().unwrap().msgs.last().unwrap().raw.clone();
+    let parsed = mail_parser::MessageParser::default().parse(&saved).unwrap();
+    assert!(parsed.to().is_none(), "a draft may leave To for the user");
+    assert!(parsed.body_text(0).unwrap().contains("Come along"));
+    assert!(parsed.body_html(0).unwrap().contains("cid:poster@pataka"));
+    assert_eq!(parsed.attachments().count(), 2);
 
     // Nested label names with spaces, slashes and macrons, by name.
     let (rec, _) = m
