@@ -208,6 +208,15 @@ function sourceOf(blocks: Block[], tool: string | undefined): string | undefined
   return tool ? describeCall(tool, {}) : undefined
 }
 
+const MAIL_PREFIX = 'mcp__pataka-mail__'
+
+/** A tool result from the mail tools, by its call or else the row's tool. */
+function isMailResult(b: Block, originTool: string | undefined): boolean {
+  if (b.type !== 'tool_result') return false
+  const tool = (typeof b.tool_use_id === 'string' ? toolCalls.get(b.tool_use_id)?.tool : undefined) ?? originTool
+  return typeof tool === 'string' && tool.startsWith(MAIL_PREFIX)
+}
+
 async function redactTexts($: Dollar, texts: string[]): Promise<Redacted> {
   if (texts.every(t => !t.trim())) return { texts, categories: {}, tapu: false }
   const r = await call<Redacted>($, 'redact', { texts })
@@ -298,7 +307,12 @@ export const register: Register = on => {
     const source = sourceOf(e.message.content as Block[], typeof origin?.tool === 'string' ? origin.tool : undefined)
     const content = await readableMedia($, e.message.content as Block[])
     const slots: { get: () => string; set: (s: string) => void }[] = []
-    textSlots(content, slots)
+    // Mail results were redacted by the service with this session's vault
+    // (and checked for tapu) before they got here. Their placeholders are
+    // real: redacting again would mark every one `literal`, and the person
+    // would see bracketed text where names should be.
+    const originTool = typeof origin?.tool === 'string' ? origin.tool : undefined
+    textSlots(content.filter(b => !isMailResult(b, originTool)), slots)
     if (slots.length === 0) return next({ ...e, message: { ...e.message, content } })
     const originals = slots.map(s => s.get())
     let r = await redactTexts($, originals)
