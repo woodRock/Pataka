@@ -498,6 +498,53 @@ fn plain_decimal(s: &str) -> bool {
         && frac.is_some_and(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// A name span that runs across a table's column gap (three or more spaces,
+/// or a line break with indentation) into a cell with no letters in it (a
+/// count, a year) is cut back to the cell with the name: in a table read as
+/// text, `29⏎        Nemotron` is two cells, not one place. Cells with
+/// letters on both sides of a gap are left together, so a name wrapped
+/// over two lines stays one span.
+fn trim_table_cells(text: &str, s: &mut Span) {
+    if !matches!(s.category, Category::Person | Category::Address | Category::Affiliation) {
+        return;
+    }
+    let inner = &text[s.start..s.end];
+    // Cells: (start, end) within `inner`, split at gaps.
+    let mut cells: Vec<(usize, usize)> = Vec::new();
+    let mut cell_start = 0;
+    let mut i = 0;
+    let bytes = inner.as_bytes();
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            let run_end = i + bytes[i..].iter().take_while(|b| b.is_ascii_whitespace()).count();
+            let run = &inner[i..run_end];
+            let gap = run.len() >= 3 || (run.contains('\n') && run.len() >= 2);
+            if gap {
+                cells.push((cell_start, i));
+                cell_start = run_end;
+            }
+            i = run_end;
+        } else {
+            i += 1;
+        }
+    }
+    cells.push((cell_start, inner.len()));
+    if cells.len() < 2 {
+        return;
+    }
+    let lettered = |&(a, b): &(usize, usize)| inner[a..b].chars().any(char::is_alphabetic);
+    let Some(first) = cells.iter().position(lettered) else {
+        return;
+    };
+    let last = cells.iter().rposition(lettered).unwrap_or(first);
+    let (start, end) = (s.start + cells[first].0, s.start + cells[last].1);
+    if (start, end) != (s.start, s.end) {
+        s.start = start;
+        s.end = end;
+        s.text = text[start..end].to_string();
+    }
+}
+
 /// Clean the name model's spans before they are trusted: drop fragments that
 /// identify no one, ids and keys it mistakes for secrets, take titles off
 /// names, and join a first and last name the model returned as two spans, so
@@ -511,9 +558,10 @@ fn tidy_model_spans(text: &str, model: &[Span]) -> Vec<Span> {
             if s.category == Category::Person {
                 strip_honorifics(text, &mut s);
             }
+            trim_table_cells(text, &mut s);
             s
         })
-        .filter(|s| substantial(s.category, &s.text))
+        .filter(|s| s.start < s.end && substantial(s.category, &s.text))
         .collect();
     spans.sort_by_key(|s| (s.start, s.end));
     let mut out: Vec<Span> = Vec::with_capacity(spans.len());
@@ -1905,6 +1953,52 @@ mod remembered_misfire_tests {
         )
         .output;
         assert!(!out.starts_with("Koro"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod table_cell_tests {
+    use super::*;
+
+    fn model(text: &str, needle: &str, category: Category) -> Span {
+        let start = text.find(needle).unwrap();
+        Span {
+            start,
+            end: start + needle.len(),
+            text: needle.into(),
+            category,
+            confidence: 0.95,
+            source: Source::Model,
+            detector: "test-model".into(),
+            checksum: Checksum::None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn a_count_in_the_next_table_cell_is_not_part_of_a_name() {
+        let text = "Set                  Docs  Templates\nNZ dev               800          29\n   Pounamu-PII, train   20,000\n\n\
+            References\nRangi, B. (2025). Pounamu-PII: Synthesized data for privacy.\n";
+        let spans = [model(text, "29\n   Pounamu", Category::Address)];
+        let mut vault = Vault::default();
+        vault.answer_cited(true);
+        let out = redact(text, &Default::default(), &[], &[], &spans, &mut vault).output;
+        assert_eq!(out, text, "the count and the cited dataset are shown");
+    }
+
+    #[test]
+    fn a_name_wrapped_over_two_lines_stays_one_span() {
+        let text = "Next of kin: Hemi\n   Kerekere, ph 021 555 0101";
+        let mut s = model(text, "Hemi\n   Kerekere", Category::Person);
+        trim_table_cells(text, &mut s);
+        assert_eq!(s.text, "Hemi\n   Kerekere");
+        let mut s = model(text, "Hemi\n   Kerekere, ph 021", Category::Address);
+        trim_table_cells(text, &mut s);
+        assert_eq!(s.text, "Hemi\n   Kerekere, ph 021", "no gap before the number");
+        let text = "Total      12      Hemi Kerekere";
+        let mut s = model(text, "12      Hemi Kerekere", Category::Person);
+        trim_table_cells(text, &mut s);
+        assert_eq!(s.text, "Hemi Kerekere");
     }
 }
 
