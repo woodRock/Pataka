@@ -305,14 +305,18 @@ export const register: Register = on => {
     if (SKIP_DOORS.has(e.door) || e.message.type === 'system') return next(e)
     const origin = (e as { origin?: { tool?: unknown } }).origin
     const source = sourceOf(e.message.content as Block[], typeof origin?.tool === 'string' ? origin.tool : undefined)
-    const content = await readableMedia($, e.message.content as Block[])
+    const original = e.message.content as Block[]
+    const content = await readableMedia($, original)
     const slots: { get: () => string; set: (s: string) => void }[] = []
     // Mail results were redacted by the service with this session's vault
-    // (and checked for tapu) before they got here. Their placeholders are
-    // real: redacting again would mark every one `literal`, and the person
-    // would see bracketed text where names should be.
+    // (and checked for tapu) before they got here, and so was a typed
+    // prompt's own text, at prompt.submit. Their placeholders are real:
+    // redacting again would mark every one `literal`, and the person would
+    // see bracketed text where names should be. What came with a prompt (a
+    // pasted image or document) is still checked here.
     const originTool = typeof origin?.tool === 'string' ? origin.tool : undefined
-    textSlots(content.filter(b => !isMailResult(b, originTool)), slots)
+    const typedText = (i: number) => e.door === 'prompt' && original[i]?.type === 'text'
+    textSlots(content.filter((b, i) => !isMailResult(b, originTool) && !typedText(i)), slots)
     if (slots.length === 0) return next({ ...e, message: { ...e.message, content } })
     const originals = slots.map(s => s.get())
     let r = await redactTexts($, originals)
