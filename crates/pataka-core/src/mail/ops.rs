@@ -805,8 +805,11 @@ pub struct DraftRequest<'a> {
     pub body_html: Option<&'a str>,
     /// Files to attach.
     pub attachments: &'a [compose::File],
-    /// An image shown inline where `body_html` has `<!-- POSTER -->`.
+    /// The poster's image file, attached (an embedded image does not
+    /// survive the person sending the draft).
     pub poster: Option<&'a compose::File>,
+    /// A hosted image shown where `body_html` has `<!-- POSTER -->`.
+    pub poster_url: Option<&'a str>,
     /// The message id this replies to.
     pub reply_to: Option<&'a str>,
 }
@@ -821,6 +824,7 @@ pub struct DraftText<'a> {
     pub body_html: Option<&'a str>,
     pub attachments: &'a [compose::File],
     pub poster: Option<&'a compose::File>,
+    pub poster_url: Option<&'a str>,
     /// Message-ID and References of the message this replies to.
     pub in_reply_to: Option<(String, String)>,
 }
@@ -852,7 +856,13 @@ pub fn draft_message(d: &DraftText) -> Result<Vec<u8>> {
     }
     h.push_str("MIME-Version: 1.0\r\n");
     let mut out = h.into_bytes();
-    out.extend(compose::mime_body(d.body, d.body_html, d.attachments, d.poster)?);
+    out.extend(compose::mime_body(
+        d.body,
+        d.body_html,
+        d.attachments,
+        d.poster,
+        d.poster_url,
+    )?);
     Ok(out)
 }
 
@@ -1786,6 +1796,7 @@ impl Mailer {
             body_html,
             attachments,
             poster,
+            poster_url,
             reply_to,
         } = req;
         if body.trim().is_empty() && body_html.is_none_or(|h| h.trim().is_empty()) {
@@ -1850,6 +1861,7 @@ impl Mailer {
             body_html,
             attachments,
             poster,
+            poster_url,
             in_reply_to,
         })?;
         let parts = vec![
@@ -1876,18 +1888,14 @@ impl Mailer {
         }
         let files: Vec<String> = attachments
             .iter()
+            .chain(poster)
             .map(|f| format!("{} ({})", f.name, size_text(f.data.len())))
             .collect();
         if !files.is_empty() {
             said.push_str(&format!(", attaching {}", files.join(", ")));
         }
-        if let Some(p) = poster {
-            let shown = body_html.is_some_and(|h| h.contains(compose::POSTER_MARKER));
-            said.push_str(&format!(
-                ", with {} {}",
-                p.name,
-                if shown { "shown inline" } else { "attached" }
-            ));
+        if let Some(url) = poster_url.map(str::trim).filter(|u| !u.is_empty()) {
+            said.push_str(&format!(", showing the poster hosted at {url} inline"));
         }
         if to.is_empty() {
             said.push_str(". It has no recipients yet");

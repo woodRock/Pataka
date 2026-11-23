@@ -139,7 +139,7 @@ Run `pataka claude` as usual. While a mailbox is connected, Claude Code gets the
 | `archive` | Take messages out of the Inbox | as your Claude Code settings say |
 | `mark` | Read, unread, starred or unstarred | as your Claude Code settings say |
 | `create_label` | Create a label (`/` nests it) | as your Claude Code settings say |
-| `draft` | Save a draft in Drafts: plain text, or text and HTML with a poster shown inline, with files attached (a `.ics` goes as a calendar invite). Recipients may be left blank, and `from_json` reads it all from an `email.json`. Optionally a reply in a thread. It is never sent: you send it from Gmail | as your Claude Code settings say; always asks if it attaches a file from outside the project folder |
+| `draft` | Save a draft in Drafts: plain text, or text and HTML, with files attached (a `.ics` goes as a calendar invite). A poster shown inline must be hosted: pass its https address as `poster_url`, and it appears where the HTML has `<!-- POSTER -->`. An image embedded in a draft disappears when Gmail sends it, so `poster_image` is only ever attached. Recipients may be left blank, and `from_json` reads it all from an `email.json`. Optionally a reply in a thread. It is never sent: you send it from Gmail | as your Claude Code settings say; always asks if it attaches a file from outside the project folder |
 | `trash` | Move to the Trash | always |
 
 Search results carry a message id (`mail_…`) and a thread id (`thread_…`), and are grouped by thread. Labels are addressed by name, and nested labels use `/` (`Side Quests/TODO`). In a search they are written Gmail's way: `label:side-quests-todo`. Reading, whether with `read`, `thread` or `search`, never marks a message as read.
