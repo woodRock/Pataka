@@ -56,6 +56,13 @@ pub trait Host: Send + Sync + 'static {
     fn mail(&self) -> Result<crate::mail::MailVault> {
         Err(Error::Invalid("Pātaka Mail is not available in this session.".into()))
     }
+    /// Pātaka Calendar's encrypted account store, with the unlocked key.
+    /// Only hosts that serve the calendar tools provide it.
+    fn calendar(&self) -> Result<crate::calendar::CalendarVault> {
+        Err(Error::Invalid(
+            "Pātaka Calendar is not available in this session.".into(),
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -67,6 +74,9 @@ pub struct Session {
     /// This session registered Pātaka Mail (`{base}/pataka/mcp`): serve it,
     /// and restore placeholders in `mcp__pataka-mail__*` tool arguments.
     pub mail: bool,
+    /// This session registered Pātaka Calendar (`{base}/pataka/calendar`):
+    /// serve it, and restore placeholders in its tools' arguments.
+    pub calendar: bool,
 }
 
 #[derive(Clone)]
@@ -191,7 +201,10 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
 
     // Pātaka Mail's MCP server, for sessions that registered it.
     if rest == "pataka/mcp" {
-        return mail_mcp(&st, &session, &method, &headers, &body).await;
+        return local_mcp(&st, &session, LocalServer::Mail, &method, &headers, &body).await;
+    }
+    if rest == crate::calendar::PATH {
+        return local_mcp(&st, &session, LocalServer::Calendar, &method, &headers, &body).await;
     }
 
     // Controls for a long-running proxy. Never forwarded.
@@ -263,15 +276,84 @@ async fn handle(State(st): State<ProxyState>, method: Method, uri: Uri, headers:
     forward(&st, method, &target, &headers, Some(json.to_string()), restore).await
 }
 
-/// `{base}/pataka/mcp`: the `pataka-mail` MCP server (Streamable HTTP,
+/// The MCP servers Pātaka runs itself, inside the proxy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LocalServer {
+    Mail,
+    Calendar,
+}
+
+impl LocalServer {
+    fn served(self, session: &Session) -> bool {
+        match self {
+            LocalServer::Mail => session.mail,
+            LocalServer::Calendar => session.calendar,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            LocalServer::Mail => concat!("Pātaka ", "Mail"),
+            LocalServer::Calendar => "Pātaka Calendar",
+        }
+    }
+
+    /// The source named in redaction and in the audit log.
+    fn source(self) -> &'static str {
+        match self {
+            LocalServer::Mail => "mail",
+            LocalServer::Calendar => "calendar",
+        }
+    }
+
+    /// Answer one message, or refuse with a response (no account store).
+    async fn handle(
+        self,
+        st: &ProxyState,
+        session: &Session,
+        msg: &Value,
+    ) -> std::result::Result<Option<Value>, Response> {
+        let refused = |e: Error| json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": e.to_string()}));
+        let audit = st.host.audit_path();
+        let korero = session.korero.clone();
+        Ok(match self {
+            LocalServer::Mail => {
+                let vault = st.host.mail().map_err(refused)?;
+                let ctx = crate::mail::mcp::McpContext { vault, audit, korero };
+                crate::mail::mcp::handle(&ctx, msg).await
+            }
+            LocalServer::Calendar => {
+                let vault = st.host.calendar().map_err(refused)?;
+                let ctx = crate::calendar::mcp::McpContext { vault, audit, korero };
+                crate::calendar::mcp::handle(&ctx, msg).await
+            }
+        })
+    }
+}
+
+/// `{base}/pataka/mcp` and `{base}/pataka/calendar`: the `pataka-mail` and
+/// `pataka-calendar` MCP servers (Streamable HTTP,
 /// JSON responses). Served only to sessions that registered it, never to a
 /// browser (any `Origin` header is refused), and only while unlocked.
-async fn mail_mcp(st: &ProxyState, session: &Session, method: &Method, headers: &HeaderMap, body: &Bytes) -> Response {
-    if !session.mail {
-        return error(StatusCode::NOT_FOUND, "Pātaka Mail is not part of this session.");
+async fn local_mcp(
+    st: &ProxyState,
+    session: &Session,
+    server: LocalServer,
+    method: &Method,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Response {
+    if !server.served(session) {
+        return error(
+            StatusCode::NOT_FOUND,
+            &format!("{} is not part of this session.", server.title()),
+        );
     }
     if headers.contains_key("origin") {
-        return error(StatusCode::FORBIDDEN, "Pātaka Mail only answers Claude Code.");
+        return error(
+            StatusCode::FORBIDDEN,
+            &format!("{} only answers Claude Code.", server.title()),
+        );
     }
     if method != Method::POST {
         return Response::builder()
@@ -289,15 +371,6 @@ async fn mail_mcp(st: &ProxyState, session: &Session, method: &Method, headers: 
     if st.host.status()["locked"] == true {
         return json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": "Pātaka is locked."}));
     }
-    let vault = match st.host.mail() {
-        Ok(v) => v,
-        Err(e) => return json_response(StatusCode::FORBIDDEN, serde_json::json!({"error": e.to_string()})),
-    };
-    let ctx = crate::mail::mcp::McpContext {
-        vault,
-        audit: st.host.audit_path(),
-        korero: session.korero.clone(),
-    };
     // The server is self-contained, so it is equally safe from a terminal,
     // the Claude desktop app or the Pātaka app: placeholders this session
     // issued are put back into the arguments here, on this computer, and
@@ -309,7 +382,11 @@ async fn mail_mcp(st: &ProxyState, session: &Session, method: &Method, headers: 
             &session.vault.lock().unwrap_or_else(|p| p.into_inner()),
         );
     }
-    match crate::mail::mcp::handle(&ctx, &msg).await {
+    let answer = match server.handle(st, session, &msg).await {
+        Ok(a) => a,
+        Err(refused) => return refused,
+    };
+    match answer {
         Some(mut v) if is_call => {
             let text = v["result"]["content"][0]["text"]
                 .as_str()
@@ -319,7 +396,8 @@ async fn mail_mcp(st: &ProxyState, session: &Session, method: &Method, headers: 
             let korero = session.korero.clone();
             let session = session.clone();
             let redacted =
-                tokio::task::spawn_blocking(move || redact_texts_as(host.as_ref(), &session, &[text], "mail")).await;
+                tokio::task::spawn_blocking(move || redact_texts_as(host.as_ref(), &session, &[text], server.source()))
+                    .await;
             let (text, error) = match redacted {
                 Ok(Ok((mut t, _, false))) => (t.pop().unwrap_or_default(), None),
                 Ok(Ok((_, _, true))) => (
@@ -337,7 +415,7 @@ async fn mail_mcp(st: &ProxyState, session: &Session, method: &Method, headers: 
                     let _ = audit::append(
                         &st.host.audit_path(),
                         audit::Entry {
-                            event: "mail-withheld".into(),
+                            event: format!("{}-withheld", server.source()),
                             korero: Some(korero),
                             detail: Some(why),
                             ..Default::default()

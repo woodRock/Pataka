@@ -153,6 +153,10 @@ More about the mod: [mods/tumataiti/README.md](mods/tumataiti/README.md).
 
 In the app, **Settings → Mail** (or `pataka mail connect` in a terminal) lets Claude read and tidy your mailbox, with every email redacted before Claude sees it. It can read the text of PDF attachments too, redacted the same way (images are not read yet). It never sends or permanently deletes anything, and `pataka mail undo` reverses a change. See [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md#mail).
 
+### Optional: your calendar
+
+`pataka calendar connect` lets Claude read your Google Calendar and add events to it, such as a hui it read about in an email, with everything redacted before Claude sees it. It signs in with your own Google Cloud client, invites and emails nobody, only changes events it added itself, and `pataka calendar undo` reverses a change. See [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md#calendar).
+
 ## Troubleshooting
 
 <details>

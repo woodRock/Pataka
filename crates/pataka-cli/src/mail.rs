@@ -93,7 +93,7 @@ pub fn connect(host: Option<String>, email: Option<String>) -> Result<i32> {
         println!("The Pātaka service is installed, so pataka-mail can also be offered to every Claude Code");
         println!("session, including the Claude desktop app's Code tab.");
         if ctx::confirm("Set that up now?", true) {
-            return crate::service::mail_register(true, true, true);
+            return crate::service::server_register(crate::service::Server::Mail, true, true, true);
         }
         println!("Later: `pataka mail register`.");
     }
@@ -109,7 +109,7 @@ pub fn disconnect() -> Result<i32> {
     };
     v.set_account(None)?;
     if pataka_core::claude_hooks::mail_registered() {
-        let _ = crate::service::mail_register(false, false, true);
+        let _ = crate::service::server_register(crate::service::Server::Mail, false, false, true);
     }
     audit::append(
         &ctx.store.audit_path(),

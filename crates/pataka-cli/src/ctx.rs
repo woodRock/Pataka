@@ -209,6 +209,13 @@ impl Host for CliHost {
         })
     }
 
+    fn calendar(&self) -> Result<pataka_core::calendar::CalendarVault> {
+        Ok(pataka_core::calendar::CalendarVault {
+            store: self.store.clone(),
+            key: self.key.clone(),
+        })
+    }
+
     fn notify(&self, _korero: &str, event: Value) {
         // Claude Code owns the terminal; only a blocked request is worth
         // mentioning, and Claude Code shows that error itself.

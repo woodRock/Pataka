@@ -378,7 +378,14 @@ impl Redactor<'_> {
     }
 }
 
-/// Ids of the model's `mcp__pataka-mail__*` tool calls in a request.
+/// A tool of an MCP server Pātaka runs itself (mail, calendar): its results
+/// were redacted by the proxy before Claude Code stored them.
+pub fn is_local_server_tool(name: &str) -> bool {
+    name.starts_with(crate::mail::TOOL_PREFIX) || name.starts_with(crate::calendar::TOOL_PREFIX)
+}
+
+/// Ids of the model's `mcp__pataka-mail__*` and `mcp__pataka-calendar__*`
+/// tool calls in a request.
 fn mail_tool_calls(messages: &[Value]) -> std::collections::HashSet<String> {
     messages
         .iter()
@@ -386,7 +393,7 @@ fn mail_tool_calls(messages: &[Value]) -> std::collections::HashSet<String> {
         .filter_map(|m| m["content"].as_array())
         .flatten()
         .filter(|b| b["type"] == "tool_use")
-        .filter(|b| b["name"].as_str().is_some_and(|n| n.starts_with(crate::mail::TOOL_PREFIX)))
+        .filter(|b| b["name"].as_str().is_some_and(is_local_server_tool))
         .filter_map(|b| b["id"].as_str().map(str::to_string))
         .collect()
 }

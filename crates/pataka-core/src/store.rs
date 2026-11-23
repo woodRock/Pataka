@@ -6,6 +6,7 @@
 //! keyring.json            how the data key is held (keychain or passphrase), never the key itself
 //! settings.ptk            encrypted settings, providers and API keys
 //! mail.ptk                encrypted Pātaka Mail account and label-name table
+//! calendar.ptk            encrypted Pātaka Calendar account and undo snapshots
 //! korero/<uuid>.ptk       one encrypted file per kōrero
 //! audit.jsonl             hash-chained audit log (counts only, no message text)
 //! ```
@@ -306,6 +307,23 @@ impl Store {
         )
     }
 
+    /// Pātaka Calendar: the connected Google account and what undo needs, in
+    /// `calendar.ptk`. Empty when no calendar was ever connected.
+    pub fn load_calendar<T: for<'de> Deserialize<'de> + Default>(&self, key: &DataKey) -> Result<T> {
+        match fs::read(self.root.join("calendar.ptk")) {
+            Ok(b) => Self::open_json(key, "pataka:calendar", &b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save_calendar<T: Serialize>(&self, key: &DataKey, value: &T) -> Result<()> {
+        write_atomic(
+            &self.root.join("calendar.ptk"),
+            &Self::seal_json(key, "pataka:calendar", value)?,
+        )
+    }
+
     pub fn load_conversation(&self, key: &DataKey, id: &str) -> Result<Conversation> {
         valid_id(id)?;
         let bytes = fs::read(self.conv_path(id)).map_err(|_| Error::NotFound("kōrero".into()))?;
@@ -343,7 +361,13 @@ impl Store {
         for id in self.conversation_ids()? {
             let _ = self.delete_conversation(&id);
         }
-        for f in ["settings.ptk", "mail.ptk", "keyring.json", "audit.jsonl"] {
+        for f in [
+            "settings.ptk",
+            "mail.ptk",
+            "calendar.ptk",
+            "keyring.json",
+            "audit.jsonl",
+        ] {
             let _ = shred(&self.root.join(f));
         }
         if let Ok(e) = keychain_entry() {

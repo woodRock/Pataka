@@ -316,10 +316,10 @@ fn mail_decision_with(input: &Value, allowed: bool) -> Option<Value> {
         .map(PathBuf::from)
         .map(|c| c.canonicalize().unwrap_or(c));
     let mut tool_input = input["tool_input"].clone();
-    if tool.ends_with("__draft") {
+    if tool.starts_with(pataka_core::mail::TOOL_PREFIX) && tool.ends_with("__draft") {
         restore_draft_paths(&mut tool_input);
     }
-    let reason = guards::review_mail(tool, &tool_input, strict, cwd.as_deref())?;
+    let reason = guards::review_local(tool, &tool_input, strict, cwd.as_deref())?;
     let mode = input["permission_mode"].as_str().unwrap_or("");
     let (decision, text) = if matches!(mode, "bypassPermissions" | "dontAsk") {
         (
@@ -327,7 +327,7 @@ fn mail_decision_with(input: &Value, allowed: bool) -> Option<Value> {
             format!("Pātaka refused: {reason}, and permission prompts are switched off. Switch to the default or auto mode to approve it."),
         )
     } else {
-        ("ask", format!("Pātaka asks because {reason}. Email can contain instructions aimed at Claude, so check this is what you asked for."))
+        ("ask", format!("Pātaka asks because {reason}. Email and calendar invitations can contain instructions aimed at Claude, so check this is what you asked for."))
     };
     Some(
         json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
@@ -340,7 +340,7 @@ pub fn hook_pretool() -> Result<i32> {
     let input = stdin_json();
     let tool = input["tool_name"].as_str().unwrap_or("");
     // Pātaka Mail's tools are judged in every mode, before the guard steps aside.
-    if tool.starts_with(pataka_core::mail::TOOL_PREFIX) {
+    if guards::is_local_server_tool(tool) {
         if let Some(out) = mail_decision(&input) {
             println!("{out}");
         }
@@ -434,6 +434,28 @@ mod tests {
         let g = dir.path().join("settings.json");
         std::fs::write(&g, r#"{"permissions": {"ask": ["mcp__pataka-mail__archive"]}}"#).unwrap();
         assert!(!allowed_by_rule("mcp__pataka-mail__archive", &[f, g]));
+    }
+
+    #[test]
+    fn calendar_changes_are_not_left_to_auto_mode() {
+        let decide = |tool: &str, mode: &str| {
+            mail_decision_with(
+                &json!({"tool_name": format!("mcp__pataka-calendar__{tool}"), "permission_mode": mode,
+                        "tool_input": {"title": "Hui", "start": "2026-12-03"}}),
+                false,
+            )
+            .map(|v| {
+                v["hookSpecificOutput"]["permissionDecision"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+        };
+        assert_eq!(decide("events", "auto"), None);
+        assert_eq!(decide("create_event", "default"), None);
+        assert_eq!(decide("create_event", "auto").as_deref(), Some("ask"));
+        assert_eq!(decide("delete_event", "default").as_deref(), Some("ask"));
+        assert_eq!(decide("create_event", "dontAsk").as_deref(), Some("deny"));
     }
 
     #[test]

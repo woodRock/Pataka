@@ -43,24 +43,64 @@ pub fn mail_mcp_args() -> Vec<String> {
     vec!["--mcp-config".into(), mcp.to_string()]
 }
 
+/// Whether `pataka-calendar` is registered for every Claude Code (user scope).
+pub fn calendar_registered() -> bool {
+    user_config_path()
+        .ok()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .is_some_and(|v| v["mcpServers"][crate::calendar::SERVER_NAME].is_object())
+}
+
+/// The MCP server entry for Pātaka Calendar. Its address is
+/// `PATAKA_CALENDAR_URL`, which Claude Code expands, as for mail.
+pub fn calendar_server_entry() -> Value {
+    json!({"type": "http", "url": "${PATAKA_CALENDAR_URL}"})
+}
+
+/// `--mcp-config` arguments registering Pātaka's servers for one session:
+/// mail and/or calendar.
+pub fn local_mcp_args(mail: bool, calendar: bool) -> Vec<String> {
+    let mut servers = serde_json::Map::new();
+    if mail {
+        servers.insert(crate::mail::SERVER_NAME.into(), mail_server_entry());
+    }
+    if calendar {
+        servers.insert(crate::calendar::SERVER_NAME.into(), calendar_server_entry());
+    }
+    if servers.is_empty() {
+        return Vec::new();
+    }
+    vec!["--mcp-config".into(), json!({"mcpServers": servers}).to_string()]
+}
+
+/// The PreToolUse matcher for Pātaka's own MCP servers' tools.
+pub const LOCAL_TOOLS_MATCHER: &str = "mcp__pataka-(mail|calendar)__.*";
+
 /// Flag-level settings for one Claude Code session started by Pātaka (the
 /// `pataka` command or the app): its proxy's address, which outranks a
 /// `pataka service` address in the user's settings, and, with mail, Pātaka
 /// Mail's address and (given the `pataka` program) the PreToolUse guard for
 /// its tools.
-pub fn session_settings(base_url: &str, mail: bool, guard_exe: Option<&str>) -> Value {
+pub fn session_settings(base_url: &str, mail: bool, calendar: bool, guard_exe: Option<&str>) -> Value {
     let mut s = json!({"env": {
         "ANTHROPIC_BASE_URL": base_url,
         "PATAKA_HOOK_URL": format!("{base_url}/pataka/check-prompt"),
     }});
     if mail {
         s["env"]["PATAKA_MAIL_URL"] = format!("{base_url}/pataka/mcp").into();
-        // The only mail tools are Pātaka's own: claude.ai connectors would
-        // read mail on Anthropic's side, unredacted.
+    }
+    if calendar {
+        s["env"]["PATAKA_CALENDAR_URL"] = format!("{base_url}/{}", crate::calendar::PATH).into();
+    }
+    if mail || calendar {
+        // The only mail and calendar tools are Pātaka's own: claude.ai
+        // connectors (Gmail, Google Calendar) would read them on Anthropic's
+        // side, unredacted.
         s["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false".into();
         if let Some(exe) = guard_exe {
             s["hooks"] = json!({"PreToolUse": [{
-                "matcher": "mcp__pataka-mail__.*",
+                "matcher": LOCAL_TOOLS_MATCHER,
                 "hooks": [{"type": "command", "command": command(exe, "pretool")}]}]});
         }
     }

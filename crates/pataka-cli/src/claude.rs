@@ -43,6 +43,8 @@ pub struct Running {
     pub title: String,
     /// Pātaka Mail is served at `{base_url}/pataka/mcp`.
     pub mail: bool,
+    /// Pātaka Calendar is served at `{base_url}/pataka/calendar`.
+    pub calendar: bool,
 }
 
 /// Unlock, find the terminal kōrero for this folder, and start the proxy.
@@ -51,6 +53,7 @@ pub fn start(rt: &tokio::runtime::Runtime, folder: &std::path::Path, with_mail: 
     let ctx = Ctx::open()?;
     let conv = ctx.terminal_korero(folder)?;
     let mail = with_mail && crate::mail::connected(&ctx);
+    let calendar = with_mail && crate::calendar::connected(&ctx);
     let host: Arc<dyn agent_proxy::Host> = Arc::new(CliHost::new(&ctx));
     let proxy = rt.block_on(agent_proxy::start(host))?;
     let base_url = proxy.open(Session {
@@ -58,6 +61,7 @@ pub fn start(rt: &tokio::runtime::Runtime, folder: &std::path::Path, with_mail: 
         upstream: upstream()?,
         vault: Arc::new(Mutex::new(conv.vault.clone())),
         mail,
+        calendar,
     });
     audit::append(
         &ctx.store.audit_path(),
@@ -73,6 +77,7 @@ pub fn start(rt: &tokio::runtime::Runtime, folder: &std::path::Path, with_mail: 
         korero: conv.id,
         title: conv.title,
         mail,
+        calendar,
     })
 }
 
@@ -105,10 +110,13 @@ pub fn claude(args: Vec<String>) -> Result<i32> {
     if run.mail {
         eprintln!("pataka: your mailbox is available to Claude Code as pataka-mail (changes ask first in auto mode); claude.ai connectors are off for this session.");
     }
+    if run.calendar {
+        eprintln!("pataka: your Google Calendar is available to Claude Code as pataka-calendar (changes ask first in auto mode; nobody is invited or emailed).");
+    }
     // The session's settings, at Claude Code's flag level: they outrank
     // ~/.claude/settings.json, whose `env` may point Claude Code at the
     // `pataka service` instead (it would then bypass this proxy).
-    let guard_exe = if run.mail {
+    let guard_exe = if run.mail || run.calendar {
         Some(pataka_core::claude_hooks::exe()?)
     } else {
         None
@@ -116,14 +124,16 @@ pub fn claude(args: Vec<String>) -> Result<i32> {
     let settings = SettingsFile::write(&claude_hooks::session_settings(
         &run.base_url,
         run.mail,
+        run.calendar,
         guard_exe.as_deref(),
     ))?;
     let mut extra = vec!["--settings".to_string(), settings.path().display().to_string()];
     // Registered for every Claude Code already (`pataka mail register`)? Its
     // address is PATAKA_MAIL_URL, which these settings point at this proxy.
-    if run.mail && !claude_hooks::mail_registered() {
-        extra.extend(claude_hooks::mail_mcp_args());
-    }
+    extra.extend(claude_hooks::local_mcp_args(
+        run.mail && !claude_hooks::mail_registered(),
+        run.calendar && !claude_hooks::calendar_registered(),
+    ));
     let args: Vec<String> = extra.into_iter().chain(args).collect();
 
     // Claude Code handles Ctrl-C itself; this process must not die first,
@@ -137,8 +147,8 @@ pub fn claude(args: Vec<String>) -> Result<i32> {
     });
 
     let mut cmd = Command::new(&exe);
-    if run.mail {
-        // With a mailbox connected, the only mail tools are Pātaka's own. A
+    if run.mail || run.calendar {
+        // With a mailbox or calendar connected, the only mail tools are Pātaka's own. A
         // claude.ai connector (Gmail, say) reads mail on Anthropic's side,
         // unredacted, and would only ever see placeholders to search for.
         cmd.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
@@ -150,6 +160,10 @@ pub fn claude(args: Vec<String>) -> Result<i32> {
         .env("PATAKA_KORERO", &run.korero)
         // Read by the inline MCP config, so the secret path is not in the arguments.
         .env("PATAKA_MAIL_URL", format!("{}/pataka/mcp", run.base_url))
+        .env(
+            "PATAKA_CALENDAR_URL",
+            format!("{}/{}", run.base_url, pataka_core::calendar::PATH),
+        )
         // No telemetry, error reports or other background traffic.
         .env("DISABLE_TELEMETRY", "1")
         .env("DISABLE_ERROR_REPORTING", "1")
@@ -205,13 +219,25 @@ mod tests {
     #[test]
     fn session_settings_outrank_the_service_address() {
         let base = "http://127.0.0.1:5/s/abc";
-        let s = claude_hooks::session_settings(base, false, None);
+        let s = claude_hooks::session_settings(base, false, false, None);
         assert_eq!(s["env"]["ANTHROPIC_BASE_URL"], base);
         assert!(s.get("hooks").is_none() && s["env"].get("PATAKA_MAIL_URL").is_none());
-        let s = claude_hooks::session_settings(base, true, Some("/bin/pataka"));
+        let s = claude_hooks::session_settings(base, true, false, Some("/bin/pataka"));
         assert_eq!(s["env"]["PATAKA_MAIL_URL"], format!("{base}/pataka/mcp"));
         assert_eq!(s["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"], "false");
-        assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "mcp__pataka-mail__.*");
+        assert_eq!(
+            s["hooks"]["PreToolUse"][0]["matcher"],
+            claude_hooks::LOCAL_TOOLS_MATCHER
+        );
+        let s = claude_hooks::session_settings(base, false, true, Some("/bin/pataka"));
+        assert_eq!(s["env"]["PATAKA_CALENDAR_URL"], format!("{base}/pataka/calendar"));
+        assert_eq!(s["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"], "false");
+        assert!(s["env"].get("PATAKA_MAIL_URL").is_none());
+        let a = claude_hooks::local_mcp_args(false, true);
+        let mcp: serde_json::Value = serde_json::from_str(&a[1]).unwrap();
+        assert_eq!(mcp["mcpServers"]["pataka-calendar"]["url"], "${PATAKA_CALENDAR_URL}");
+        assert!(mcp["mcpServers"].get("pataka-mail").is_none());
+        assert!(claude_hooks::local_mcp_args(false, false).is_empty());
         let f = SettingsFile::write(&s).unwrap();
         let path = f.path();
         assert!(path.exists());

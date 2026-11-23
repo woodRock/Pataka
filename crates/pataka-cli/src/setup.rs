@@ -169,6 +169,7 @@ async fn self_test(ctx: &Ctx) -> Result<()> {
         upstream,
         vault: Arc::new(Mutex::new(Default::default())),
         mail: false,
+        calendar: false,
     });
     let reply: std::result::Result<Value, reqwest::Error> = async {
         reqwest::Client::new()

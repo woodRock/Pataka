@@ -210,6 +210,16 @@ impl agent_proxy::Host for AppHost {
         })
     }
 
+    fn calendar(&self) -> Result<pataka_core::calendar::CalendarVault> {
+        let state = self.app.state::<AppState>();
+        state.with_session(|s| {
+            Ok(pataka_core::calendar::CalendarVault {
+                store: state.store.clone(),
+                key: s.key.clone(),
+            })
+        })
+    }
+
     fn notify(&self, _korero: &str, event: Value) {
         let _ = self.app.emit("agent-notice", event);
     }
@@ -261,17 +271,32 @@ async fn spawn(
             })
             .unwrap_or(false)
     };
+    // Pātaka Calendar, when a calendar is connected (`pataka calendar connect`).
+    let calendar = {
+        let state = app.state::<AppState>();
+        state
+            .with_session(|s| {
+                Ok(pataka_core::calendar::CalendarVault {
+                    store: state.store.clone(),
+                    key: s.key.clone(),
+                }
+                .connected()
+                .unwrap_or(false))
+            })
+            .unwrap_or(false)
+    };
     let base_url = proxy.open(agent_proxy::Session {
         korero: conv.id.clone(),
         upstream: upstream(),
         vault: Arc::new(Mutex::new(conv.vault.clone())),
         mail,
+        calendar,
     });
     // This proxy's address (and Pātaka Mail's) as flag-level settings, which
     // outrank a `pataka service` address in ~/.claude/settings.json. The
     // app's own approvals apply the mail guards, so no hook is added.
     let settings = pataka_core::claude_hooks::SettingsFile::write(&pataka_core::claude_hooks::session_settings(
-        &base_url, mail, None,
+        &base_url, mail, calendar, None,
     ))?;
 
     let mut args: Vec<String> = [
@@ -304,9 +329,10 @@ async fn spawn(
     }
     args.push("--settings".into());
     args.push(settings.path().display().to_string());
-    if mail && !pataka_core::claude_hooks::mail_registered() {
-        args.extend(pataka_core::claude_hooks::mail_mcp_args());
-    }
+    args.extend(pataka_core::claude_hooks::local_mcp_args(
+        mail && !pataka_core::claude_hooks::mail_registered(),
+        calendar && !pataka_core::claude_hooks::calendar_registered(),
+    ));
 
     let mut cmd = cli::command(&exe);
     cmd.args(&args)
@@ -314,6 +340,10 @@ async fn spawn(
         .stdin(Stdio::piped())
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("PATAKA_MAIL_URL", format!("{base_url}/pataka/mcp"))
+        .env(
+            "PATAKA_CALENDAR_URL",
+            format!("{base_url}/{}", pataka_core::calendar::PATH),
+        )
         // No telemetry, error reports, update checks or other background traffic.
         .env("DISABLE_TELEMETRY", "1")
         .env("DISABLE_ERROR_REPORTING", "1")
@@ -988,7 +1018,8 @@ pub async fn agent_permission(
     };
     let how = match decision.as_str() {
         // Moving mail to the Trash is never "always allowed": each needs its own yes.
-        "always" if tool == "mcp__pataka-mail__trash" => "allowed",
+        // Nor is deleting a calendar event.
+        "always" if tool == "mcp__pataka-mail__trash" || tool == "mcp__pataka-calendar__delete_event" => "allowed",
         "always" => {
             // The tool comes from Pātaka's own record of the request, not the window.
             run.always.lock().unwrap_or_else(|e| e.into_inner()).insert(tool);
