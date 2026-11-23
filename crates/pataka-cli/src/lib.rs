@@ -156,6 +156,13 @@ enum ModelCmd {
 enum AuditCmd {
     /// Check the hash chain.
     Verify,
+    /// Acknowledge forks left by two writers appending at once. Shows the
+    /// plan unless --apply is given; never changes or removes an entry.
+    Repair {
+        /// Back up the log and append the `audit-repaired` entry.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Show recent entries (counts and destinations only, never text).
     Show {
         #[arg(long, default_value_t = 30)]
@@ -278,6 +285,7 @@ pub fn run() -> i32 {
         },
         Cmd::Audit { action } => match action {
             AuditCmd::Verify => config::audit_verify(),
+            AuditCmd::Repair { apply } => config::audit_repair(apply),
             AuditCmd::Show { limit } => config::audit_show(limit),
         },
         Cmd::Hooks { action } => match action {

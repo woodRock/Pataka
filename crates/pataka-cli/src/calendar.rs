@@ -221,6 +221,11 @@ pub fn undo(seq: u64) -> Result<i32> {
         ));
     }
     let entries = audit::all(&path)?;
+    if entries.iter().filter(|e| e.seq == seq).count() > 1 {
+        return Err(Error::Invalid(format!(
+            "Two audit entries are numbered {seq} (written at the same moment), so Pātaka will not guess which you mean."
+        )));
+    }
     let entry = entries
         .iter()
         .find(|e| e.seq == seq)
