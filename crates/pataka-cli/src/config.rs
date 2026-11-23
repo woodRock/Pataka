@@ -212,6 +212,12 @@ pub fn audit_verify() -> Result<i32> {
             "The audit log is intact: {} entries, each chained to the one before.",
             v.entries
         );
+        if v.acknowledged > 0 {
+            println!(
+                "{} fork(s) from two writers appending at once are acknowledged by an audit-repaired entry.",
+                v.acknowledged
+            );
+        }
         Ok(0)
     } else {
         println!(
@@ -219,8 +225,61 @@ pub fn audit_verify() -> Result<i32> {
             v.first_bad.unwrap_or(0),
             v.entries
         );
+        println!("`pataka audit repair` shows whether this is a fork from concurrent writes it can acknowledge.");
         Ok(1)
     }
+}
+
+pub fn audit_repair(apply: bool) -> Result<i32> {
+    let store = ctx::store()?;
+    let path = store.audit_path();
+    let plan = audit::repair(&path, apply)?;
+    if let Some(line) = plan.unrepairable {
+        println!(
+            "The chain breaks at line {} of {}, and that is not a fork from two writers appending at once:",
+            line + 1,
+            plan.entries
+        );
+        println!("an entry there was edited, removed or reordered. Nothing was changed.");
+        return Ok(1);
+    }
+    if plan.forks.is_empty() {
+        println!("The audit log is intact: {} entries. Nothing to repair.", plan.entries);
+        return Ok(0);
+    }
+    for f in &plan.forks {
+        println!(
+            "Fork at line {}: lines {} and {} were written at the same moment, both as entry {}, and both link to the entry before them.",
+            f.line + 1,
+            f.sibling_line + 1,
+            f.line + 1,
+            f.seq
+        );
+        println!(
+            "  The chain carries on from line {}. Line {} stays in the log, unchanged.",
+            f.line + 1,
+            f.sibling_line + 1
+        );
+    }
+    match (plan.entry, plan.backup) {
+        (Some(n), Some(b)) => {
+            println!(
+                "Acknowledged in entry {n}. The log as it was is kept at {}.",
+                b.display()
+            );
+            println!("No entry was changed, renumbered or removed.");
+        }
+        _ => {
+            println!(
+                "To acknowledge {}: `pataka audit repair --apply`. It copies the log to a backup beside it,",
+                if plan.forks.len() == 1 { "it" } else { "them" }
+            );
+            println!(
+                "then appends one audit-repaired entry naming each fork. No entry is changed, renumbered or removed."
+            );
+        }
+    }
+    Ok(0)
 }
 
 pub fn audit_show(limit: usize) -> Result<i32> {

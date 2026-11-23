@@ -386,7 +386,11 @@ fn mail_tool_calls(messages: &[Value]) -> std::collections::HashSet<String> {
         .filter_map(|m| m["content"].as_array())
         .flatten()
         .filter(|b| b["type"] == "tool_use")
-        .filter(|b| b["name"].as_str().is_some_and(|n| n.starts_with(crate::mail::TOOL_PREFIX)))
+        .filter(|b| {
+            b["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with(crate::mail::TOOL_PREFIX))
+        })
         .filter_map(|b| b["id"].as_str().map(str::to_string))
         .collect()
 }
