@@ -1,5 +1,10 @@
 //! What goes into a draft beyond plain text: an HTML body, attached files, a
-//! poster shown inline, and drafts read whole from an `email.json`.
+//! hosted poster shown inline, and drafts read whole from an `email.json`.
+//!
+//! A poster shown inline must be hosted (`poster_url`). An image embedded in
+//! the draft itself (multipart/related, `cid:`) looks right in Drafts, but
+//! Gmail drops it when the person sends the draft, so recipients see only
+//! "[image: Poster]". `poster_image` is therefore always a plain attachment.
 //!
 //! The MCP server runs inside the proxy and does not know the session's
 //! folder, so paths given as arguments must be absolute. Paths inside an
@@ -14,9 +19,8 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 
-/// Where `poster_image` goes in `body_html`.
+/// Where `poster_url` is shown in `body_html`.
 pub const POSTER_MARKER: &str = "<!-- POSTER -->";
-const POSTER_CID: &str = "poster@pataka";
 /// Files may add up to this much. Base64 makes them about a third bigger,
 /// and mail servers refuse messages much over 25 MB.
 pub const MAX_FILES: u64 = 18 * 1024 * 1024;
@@ -31,6 +35,7 @@ pub struct DraftSpec {
     pub body_html: Option<String>,
     pub attachments: Vec<PathBuf>,
     pub poster_image: Option<PathBuf>,
+    pub poster_url: Option<String>,
     pub reply_to: Option<String>,
 }
 
@@ -184,6 +189,7 @@ pub fn resolve(args: &Value) -> Result<DraftSpec> {
         body_html: text("body_html"),
         attachments,
         poster_image,
+        poster_url: text("poster_url").map(|u| u.trim().to_string()),
         reply_to: args["reply_to"]
             .as_str()
             .filter(|r| !r.trim().is_empty())
@@ -339,33 +345,27 @@ fn calendar_method(data: &[u8]) -> String {
         .unwrap_or_else(|| "PUBLISH".into())
 }
 
-fn file_part(f: &File, cid: Option<&str>) -> Vec<u8> {
+fn file_part(f: &File) -> Vec<u8> {
     let mut ct = f.mime.clone();
     if f.mime == "text/calendar" {
         ct.push_str(&format!("; charset=utf-8; method={}", calendar_method(&f.data)));
     } else if f.mime.starts_with("text/") {
         ct.push_str("; charset=utf-8");
     }
-    let mut h = format!("Content-Type: {ct}; {}\r\n", param("name", &f.name));
-    match cid {
-        Some(id) => h.push_str(&format!(
-            "Content-ID: <{id}>\r\nContent-Disposition: inline; {}\r\n",
-            param("filename", &f.name)
-        )),
-        None => h.push_str(&format!(
-            "Content-Disposition: attachment; {}\r\n",
-            param("filename", &f.name)
-        )),
-    }
+    let mut h = format!(
+        "Content-Type: {ct}; {}\r\nContent-Disposition: attachment; {}\r\n",
+        param("name", &f.name),
+        param("filename", &f.name)
+    );
     h.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
     let mut out = h.into_bytes();
     out.extend(base64_lines(&f.data));
     out
 }
 
-fn multipart(subtype: &str, extra: &str, parts: Vec<Vec<u8>>) -> Vec<u8> {
+fn multipart(subtype: &str, parts: Vec<Vec<u8>>) -> Vec<u8> {
     let b = format!("=_pataka_{}", uuid::Uuid::new_v4().simple());
-    let mut out = format!("Content-Type: multipart/{subtype}; boundary=\"{b}\"{extra}\r\n\r\n").into_bytes();
+    let mut out = format!("Content-Type: multipart/{subtype}; boundary=\"{b}\"\r\n\r\n").into_bytes();
     for p in parts {
         out.extend_from_slice(format!("--{b}\r\n").as_bytes());
         out.extend(p);
@@ -374,17 +374,65 @@ fn multipart(subtype: &str, extra: &str, parts: Vec<Vec<u8>>) -> Vec<u8> {
     out
 }
 
+/// A hosted poster's address, checked: https, and nothing that could break
+/// out of the `src="…"` it goes in.
+fn poster_src(url: &str) -> Result<&str> {
+    let ok = url.len() > "https://".len()
+        && url.get(..8).is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+        && !url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "\"'<>`".contains(c));
+    if ok {
+        Ok(url)
+    } else {
+        Err(Error::Invalid(format!(
+            "poster_url must be an https:// address of the hosted image (got {url})."
+        )))
+    }
+}
+
+/// `body_html` with the hosted poster put where its marker is.
+fn place_poster(html: &str, poster_url: Option<&str>, poster_image: Option<&File>) -> Result<String> {
+    let marked = html.contains(POSTER_MARKER);
+    match poster_url {
+        Some(url) => {
+            let src = poster_src(url)?;
+            if !marked {
+                return Err(Error::Invalid(format!(
+                    "body_html has no {POSTER_MARKER} marker to show poster_url in."
+                )));
+            }
+            let img = format!("<img src=\"{src}\" alt=\"Poster\" style=\"max-width:100%;height:auto\">");
+            Ok(html.replace(POSTER_MARKER, &img))
+        }
+        None if marked && poster_image.is_some() => Err(Error::Invalid(format!(
+            "An image embedded in a draft does not survive Gmail sending it, so poster_image can only be \
+             attached. To show it inline at {POSTER_MARKER}, host it at an https:// address and pass \
+             poster_url (poster_image may still attach the file too)."
+        ))),
+        None => Ok(html.to_string()),
+    }
+}
+
 /// The body of a draft, from its Content-Type header on: plain text, or
-/// plain text and HTML as alternatives (the HTML with the poster inline),
-/// with any files attached.
-pub fn mime_body(body: &str, html: Option<&str>, files: &[File], poster: Option<&File>) -> Result<Vec<u8>> {
+/// plain text and HTML as alternatives (the HTML showing a hosted poster),
+/// with any files attached, `poster_image` among them.
+pub fn mime_body(
+    body: &str,
+    html: Option<&str>,
+    files: &[File],
+    poster_image: Option<&File>,
+    poster_url: Option<&str>,
+) -> Result<Vec<u8>> {
     let html = html.filter(|h| !h.trim().is_empty());
-    let mut attached: Vec<Vec<u8>> = files.iter().map(|f| file_part(f, None)).collect();
+    let poster_url = poster_url.map(str::trim).filter(|u| !u.is_empty());
+    let attached: Vec<Vec<u8>> = files.iter().chain(poster_image).map(file_part).collect();
     let main = match html {
         None => {
-            // No HTML to show the poster in: it goes as an attachment.
-            if let Some(p) = poster {
-                attached.push(file_part(p, None));
+            if poster_url.is_some() {
+                return Err(Error::Invalid(format!(
+                    "poster_url is shown in body_html, at its {POSTER_MARKER} marker; give a body_html."
+                )));
             }
             text_part("plain", body)
         }
@@ -394,27 +442,8 @@ pub fn mime_body(body: &str, html: Option<&str>, files: &[File], poster: Option<
             } else {
                 body.to_string()
             };
-            let html_part = match poster {
-                None => text_part("html", h),
-                Some(p) => {
-                    if !h.contains(POSTER_MARKER) {
-                        return Err(Error::Invalid(format!(
-                            "body_html has no {POSTER_MARKER} marker to put poster_image in."
-                        )));
-                    }
-                    let img =
-                        format!("<img src=\"cid:{POSTER_CID}\" alt=\"Poster\" style=\"max-width:100%;height:auto\">");
-                    multipart(
-                        "related",
-                        "; type=\"text/html\"",
-                        vec![
-                            text_part("html", &h.replace(POSTER_MARKER, &img)),
-                            file_part(p, Some(POSTER_CID)),
-                        ],
-                    )
-                }
-            };
-            multipart("alternative", "", vec![text_part("plain", &plain), html_part])
+            let h = place_poster(h, poster_url, poster_image)?;
+            multipart("alternative", vec![text_part("plain", &plain), text_part("html", &h)])
         }
     };
     if attached.is_empty() {
@@ -422,7 +451,7 @@ pub fn mime_body(body: &str, html: Option<&str>, files: &[File], poster: Option<
     }
     let mut parts = vec![main];
     parts.extend(attached);
-    Ok(multipart("mixed", "", parts))
+    Ok(multipart("mixed", parts))
 }
 
 #[cfg(test)]
@@ -444,6 +473,11 @@ mod tests {
         [user, "example.nz"].join("@")
     }
 
+    /// A hosted image's address, built at run time like `addr`.
+    fn hosted(path: &str) -> String {
+        format!("{}://example.nz/{path}", "https")
+    }
+
     fn message(body: Vec<u8>) -> Vec<u8> {
         let mut m = format!("From: {}\r\nSubject: s\r\nMIME-Version: 1.0\r\n", addr("a")).into_bytes();
         m.extend(body);
@@ -454,12 +488,14 @@ mod tests {
     fn html_poster_and_files_make_one_email() {
         let ics = b"BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n";
         let png = b"\x89PNG\r\n\x1a\nnot really";
+        let url = hosted("talk/poster.png");
         let raw = message(
             mime_body(
                 "Hello, the talk is on Friday.",
                 Some("<p>Hello</p><!-- POSTER --><p>Friday</p>"),
                 &[file("poster.pdf", b"%PDF-1.4"), file("event.ics", ics)],
                 Some(&file("poster.png", png)),
+                Some(&url),
             )
             .unwrap(),
         );
@@ -467,7 +503,7 @@ mod tests {
         assert_eq!(m.body_text(0).unwrap().trim(), "Hello, the talk is on Friday.");
         let html = m.body_html(0).unwrap();
         assert!(
-            html.contains("cid:poster@pataka") && !html.contains(POSTER_MARKER),
+            html.contains(&format!("<img src=\"{url}\"")) && !html.contains(POSTER_MARKER) && !html.contains("cid:"),
             "{html}"
         );
         let names: Vec<String> = m
@@ -486,45 +522,66 @@ mod tests {
         assert_eq!((ct.ctype(), ct.subtype()), ("text", Some("calendar")));
         assert_eq!(ct.attribute("method"), Some("REQUEST"));
         assert_eq!(cal.contents(), ics);
+        // poster_image goes as an ordinary attachment, never embedded.
         let poster = m
             .attachments()
-            .find(|a| a.content_id() == Some("poster@pataka"))
+            .find(|a| a.attachment_name() == Some("poster.png"))
             .unwrap();
         assert_eq!(poster.contents(), png);
+        assert!(poster.content_id().is_none());
         let text = String::from_utf8_lossy(&raw);
-        for t in ["multipart/mixed", "multipart/alternative", "multipart/related"] {
+        for t in ["multipart/mixed", "multipart/alternative"] {
             assert!(text.contains(t), "no {t}");
         }
+        assert!(!text.contains("multipart/related") && !text.contains("Content-ID"));
     }
 
     #[test]
     fn plain_text_alone_stays_plain() {
-        let raw = mime_body("Hello", None, &[], None).unwrap();
+        let raw = mime_body("Hello", None, &[], None, None).unwrap();
         assert!(String::from_utf8_lossy(&raw).starts_with("Content-Type: text/plain; charset=utf-8"));
     }
 
     #[test]
     fn html_without_text_gets_a_text_version() {
-        let raw = message(mime_body("", Some("<p>Hello everyone</p>"), &[], None).unwrap());
+        let raw = message(mime_body("", Some("<p>Hello everyone</p>"), &[], None, None).unwrap());
         let m = MessageParser::default().parse(&raw).unwrap();
         assert!(m.body_text(0).unwrap().contains("Hello everyone"));
     }
 
     #[test]
-    fn a_poster_needs_its_marker() {
-        let e = mime_body("x", Some("<p>no marker</p>"), &[], Some(&file("p.png", b"x"))).unwrap_err();
+    fn a_poster_needs_its_marker_and_a_hosted_address() {
+        let url = hosted("p.png");
+        let e = mime_body("x", Some("<p>no marker</p>"), &[], None, Some(&url)).unwrap_err();
         assert!(e.to_string().contains("<!-- POSTER -->"), "{e}");
-        // With no HTML at all it is simply attached.
-        let raw = message(mime_body("x", None, &[], Some(&file("p.png", b"x"))).unwrap());
-        let m = MessageParser::default().parse(&raw).unwrap();
-        assert_eq!(m.attachments().count(), 1);
+        let e = mime_body("x", None, &[], None, Some(&url)).unwrap_err();
+        assert!(e.to_string().contains("body_html"), "{e}");
+        let bad = [
+            url.replacen("https", "http", 1),
+            format!("{}:///tmp/p.png", "file"),
+            hosted("p.png\" onerror=\"x"),
+            format!("{}://", "https"),
+        ];
+        for b in &bad {
+            let e = mime_body("x", Some("<!-- POSTER -->"), &[], None, Some(b)).unwrap_err();
+            assert!(e.to_string().contains("poster_url must be"), "{b}: {e}");
+        }
+        // An image file with the marker but no hosted address is refused, not embedded.
+        let e = mime_body("x", Some("<!-- POSTER -->"), &[], Some(&file("p.png", b"x")), None).unwrap_err();
+        assert!(e.to_string().contains("poster_url"), "{e}");
+        // Without the marker, or without HTML, it is simply attached.
+        for html in [None, Some("<p>Hi</p>")] {
+            let raw = message(mime_body("x", html, &[], Some(&file("p.png", b"x")), None).unwrap());
+            let m = MessageParser::default().parse(&raw).unwrap();
+            assert_eq!(m.attachments().count(), 1);
+        }
     }
 
     #[test]
     fn non_ascii_file_names_are_encoded() {
         assert_eq!(param("filename", "a.pdf"), "filename=\"a.pdf\"");
         assert_eq!(param("filename", "pānui.pdf"), "filename*=UTF-8''p%C4%81nui.pdf");
-        let raw = message(mime_body("x", None, &[file("pānui.pdf", b"%PDF")], None).unwrap());
+        let raw = message(mime_body("x", None, &[file("pānui.pdf", b"%PDF")], None, None).unwrap());
         let m = MessageParser::default().parse(&raw).unwrap();
         assert_eq!(m.attachments().next().unwrap().attachment_name(), Some("pānui.pdf"));
     }
@@ -551,7 +608,8 @@ mod tests {
             "to": "", "cc": [], "subject": "Talk on Friday",
             "body": "Hello", "body_html": "<p>Hello</p><!-- POSTER -->",
             "attachments": ["talks/kōrero/build/poster.pdf"],
-            "poster_image": "talks/kōrero/build/poster.png"
+            "poster_image": "talks/kōrero/build/poster.png",
+            "poster_url": format!(" {} ", hosted("poster.png"))
         });
         std::fs::write(build.join("email.json"), email.to_string()).unwrap();
         let from_json = build.join("email.json").display().to_string();
@@ -562,6 +620,7 @@ mod tests {
         assert_eq!(s.subject, "Talk on Friday");
         assert_eq!(s.attachments, vec![build.join("poster.pdf")]);
         assert_eq!(s.poster_image, Some(build.join("poster.png")));
+        assert_eq!(s.poster_url, Some(hosted("poster.png")));
         let (files, poster) = load(&s).unwrap();
         assert_eq!(files[0].mime, "application/pdf");
         assert_eq!(poster.unwrap().mime, "image/png");

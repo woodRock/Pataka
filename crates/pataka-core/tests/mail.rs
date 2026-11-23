@@ -890,6 +890,7 @@ async fn threads_drafts_and_nested_labels() {
                 body_html: None,
                 attachments: &[],
                 poster: None,
+                poster_url: None,
                 body: "Kia ora Kahu, I'll send the signed copy tomorrow.",
                 reply_to: Some(&boss_id),
             },
@@ -914,7 +915,8 @@ async fn threads_drafts_and_nested_labels() {
         "undo moves the draft to the Trash"
     );
 
-    // A full email: no recipients yet, HTML with the poster inline, a calendar file.
+    // A full email: no recipients yet, HTML showing a hosted poster, a calendar file.
+    let poster_url = format!("{}://example.nz/poster.png", "https");
     let poster = pataka_core::mail::compose::File {
         name: "poster.png".into(),
         mime: "image/png".into(),
@@ -938,21 +940,33 @@ async fn threads_drafts_and_nested_labels() {
                 body_html: Some("<p>Come along</p><!-- POSTER -->"),
                 attachments: std::slice::from_ref(&ics),
                 poster: Some(&poster),
+                poster_url: Some(&poster_url),
                 reply_to: None,
             },
         )
         .await
         .unwrap();
     assert!(
-        text.contains("event.ics") && text.contains("shown inline") && text.contains("no recipients"),
+        text.contains("event.ics")
+            && text.contains("poster.png")
+            && text.contains("inline")
+            && text.contains("no recipients"),
         "{text}"
     );
     let saved = imap.lock().unwrap().msgs.last().unwrap().raw.clone();
     let parsed = mail_parser::MessageParser::default().parse(&saved).unwrap();
     assert!(parsed.to().is_none(), "a draft may leave To for the user");
     assert!(parsed.body_text(0).unwrap().contains("Come along"));
-    assert!(parsed.body_html(0).unwrap().contains("cid:poster@pataka"));
-    assert_eq!(parsed.attachments().count(), 2);
+    let html = parsed.body_html(0).unwrap();
+    assert!(
+        html.contains(&format!("src=\"{poster_url}\"")) && !html.contains("cid:"),
+        "{html}"
+    );
+    assert_eq!(
+        parsed.attachments().count(),
+        2,
+        "event.ics and poster.png, both attached"
+    );
 
     // Nested label names with spaces, slashes and macrons, by name.
     let (rec, _) = m
