@@ -69,12 +69,12 @@ enum Cmd {
         #[command(subcommand)]
         action: HooksCmd,
     },
-    /// Pātaka Mail: let Claude Code read and organise your mailbox over IMAP.
     /// Pātaka Calendar: let Claude Code read your Google Calendar and add events to it.
     Calendar {
         #[command(subcommand)]
         action: CalendarCmd,
     },
+    /// Pātaka Mail: let Claude Code read and organise your mailbox over IMAP.
     Mail {
         #[command(subcommand)]
         action: MailCmd,

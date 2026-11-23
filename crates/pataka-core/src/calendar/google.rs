@@ -408,6 +408,9 @@ pub fn line(ev: &Value) -> String {
     if ev["status"] == "tentative" {
         s += " · tentative";
     }
+    if ev["status"] == "cancelled" {
+        s += " · deleted";
+    }
     if is_ours(ev) {
         s += " · added by Pātaka";
     }
@@ -476,6 +479,13 @@ mod tests {
         assert_eq!(body["summary"], "A");
         assert_eq!(body["location"], "");
         assert!(body.get("reminders").is_none());
+    }
+
+    #[test]
+    fn deleted_events_say_so() {
+        let ev =
+            json!({"id": "a1", "status": "cancelled", "start": {"date": "2026-12-03"}, "end": {"date": "2026-12-04"}});
+        assert!(line(&ev).ends_with(" · deleted"), "{}", line(&ev));
     }
 
     #[test]
