@@ -232,11 +232,59 @@ pub fn review_mail(tool: &str, input: &Value, strict: bool, workspace: Option<&P
     (strict || n > MAIL_BULK || !crate::mail::mcp::WRITE_TOOLS.contains(&name)).then_some(what)
 }
 
+/// The part of a Pātaka Calendar tool name after `mcp__pataka-calendar__`.
+fn calendar_tool(tool: &str) -> Option<&str> {
+    tool.strip_prefix(crate::calendar::TOOL_PREFIX)
+}
+
+/// Pātaka Calendar's own rule, like mail's. Reading never asks. Deleting
+/// always asks. Adding and changing events ask when `strict` (auto mode,
+/// where nobody else would ask): the request to add an event usually comes
+/// from an email or an invitation, which can carry instructions aimed at
+/// Claude, so each needs the person's explicit yes there.
+pub fn review_calendar(tool: &str, input: &Value, strict: bool) -> Option<String> {
+    let name = calendar_tool(tool)?;
+    if crate::calendar::mcp::READ_TOOLS.contains(&name) {
+        return None;
+    }
+    let field = |k: &str| input[k].as_str().map(str::trim).filter(|v| !v.is_empty());
+    let what = match name {
+        "delete_event" => return Some("this deletes an event Pātaka added from your Google Calendar".into()),
+        "create_event" => {
+            let mut w = "this adds an event to your Google Calendar".to_string();
+            if let Some(t) = field("title") {
+                w += &format!(": \"{t}\"");
+            }
+            if let Some(s) = field("start") {
+                w += &format!(" at {s}");
+            }
+            w + " (nobody is invited or emailed)"
+        }
+        "update_event" => "this changes an event Pātaka added to your Google Calendar".into(),
+        other => format!("this changes your calendar ({other})"),
+    };
+    (strict || !crate::calendar::mcp::WRITE_TOOLS.contains(&name)).then_some(what)
+}
+
+/// A tool of one of Pātaka's own MCP servers, which its hook judges in
+/// every mode.
+pub fn is_local_server_tool(tool: &str) -> bool {
+    mail_tool(tool).is_some() || calendar_tool(tool).is_some()
+}
+
+/// The rule for one of Pātaka's own MCP servers' tools.
+pub fn review_local(tool: &str, input: &Value, strict: bool, workspace: Option<&Path>) -> Option<String> {
+    if calendar_tool(tool).is_some() {
+        return review_calendar(tool, input, strict);
+    }
+    review_mail(tool, input, strict, workspace)
+}
+
 /// `review_tool` for a session in auto mode: the same, except that every
 /// Pātaka Mail change asks.
 pub fn review_tool_auto(tool: &str, input: &Value, workspace: &Path) -> Option<String> {
-    if mail_tool(tool).is_some() {
-        return review_mail(tool, input, true, Some(workspace));
+    if is_local_server_tool(tool) {
+        return review_local(tool, input, true, Some(workspace));
     }
     review_tool(tool, input, workspace)
 }
@@ -244,8 +292,8 @@ pub fn review_tool_auto(tool: &str, input: &Value, workspace: &Path) -> Option<S
 /// Why this tool call must be approved, if it must (`None`: Pātaka's guards
 /// have no objection).
 pub fn review_tool(tool: &str, input: &Value, workspace: &Path) -> Option<String> {
-    if mail_tool(tool).is_some() {
-        return review_mail(tool, input, false, Some(workspace));
+    if is_local_server_tool(tool) {
+        return review_local(tool, input, false, Some(workspace));
     }
     if tool.starts_with("mcp__") {
         return Some("it sends data to an MCP server".into());
@@ -326,6 +374,27 @@ mod tests {
 
     fn ids(n: usize) -> Value {
         json!((0..n).map(|i| format!("g1.{i}")).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn calendar_reads_never_ask_and_changes_ask_in_auto_mode() {
+        for t in crate::calendar::mcp::READ_TOOLS {
+            let tool = format!("mcp__pataka-calendar__{t}");
+            assert_eq!(review_calendar(&tool, &json!({}), true), None);
+            assert_eq!(review_tool(&tool, &json!({}), &ws()), None);
+        }
+        let add = "mcp__pataka-calendar__create_event";
+        let input = json!({"title": "Hui", "start": "2026-12-03T10:00"});
+        assert_eq!(review_tool(add, &input, &ws()), None);
+        let why = review_tool_auto(add, &input, &ws()).unwrap();
+        assert!(
+            why.contains("Hui") && why.contains("2026-12-03T10:00") && why.contains("nobody"),
+            "{why}"
+        );
+        assert!(review_tool_auto("mcp__pataka-calendar__update_event", &json!({}), &ws()).is_some());
+        // Deleting always asks; a tool this version does not know asks too.
+        assert!(review_tool("mcp__pataka-calendar__delete_event", &json!({}), &ws()).is_some());
+        assert!(review_tool("mcp__pataka-calendar__clear", &json!({}), &ws()).is_some());
     }
 
     #[test]

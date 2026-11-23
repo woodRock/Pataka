@@ -541,12 +541,14 @@ async fn mail_end_to_end() {
         upstream: format!("http://127.0.0.1:{model_port}"),
         vault: Arc::new(Mutex::new(Vault::default())),
         mail: true,
+        calendar: false,
     });
     let other = proxy.open(Session {
         korero: korero.clone(),
         upstream: format!("http://127.0.0.1:{model_port}"),
         vault: Arc::new(Mutex::new(Vault::default())),
         mail: false,
+        calendar: false,
     });
     let client = reqwest::Client::new();
 

@@ -214,6 +214,71 @@ This puts back the labels, flags or folder the messages had, and writes its own 
 - On other servers, labels are folders. `label` is not available there, `move` needs the server's MOVE support, and `archive` needs an Archive folder.
 - Real values go back only into `pataka-mail`'s own tool calls, by its server. Do not add another MCP server called `pataka-mail` to your Claude Code settings.
 
+## Calendar
+
+Pātaka Calendar lets Claude Code, run through `pataka claude`, read your Google Calendar and add events to it, for example when it reads an email about a hui. As with mail, Anthropic only ever sees redacted text. Real names and places are filled back in on your computer just before Pātaka talks to Google.
+
+### Connect
+
+Pātaka signs in to Google with **your own OAuth client**, so no one else's app sits between you and your calendar. You make it once, in Google Cloud Console:
+
+1. Create a project (any name), and enable the **Google Calendar API** in it.
+2. Under **Google Auth Platform**, set up the consent screen: *External*, with your own address added as a test user. It can stay in *Testing*, because nobody else uses it.
+3. Under **Clients**, create an OAuth client of type **Desktop app**, and download its file.
+
+Then:
+
+```bash
+pataka calendar connect --client ~/Downloads/client_secret_….json
+pataka calendar status
+pataka calendar disconnect
+```
+
+`connect` opens Google's sign-in page in your browser. Google warns that it has not verified the app: it is your own client, so choose *Continue*, and allow access to your events. Google then sends the browser back to a one-off listener on this computer, and Pātaka exchanges the code (with a PKCE check only it can pass) for lasting access. The client and that access are stored encrypted in Pātaka's data folder (`calendar.ptk`). Pātaka asks only for events and the list of your calendars. It cannot change your calendars' settings or sharing. `disconnect` revokes the access at Google and forgets it.
+
+### Use
+
+Run `pataka claude` as usual. While a calendar is connected, Claude Code gets the `pataka-calendar` tools, and so do the Pātaka app's agent kōrero. `pataka calendar register` offers them to every Claude Code session through the service, as `pataka mail register` does for mail ([Every Claude Code](#every-claude-code)).
+
+| Tool | What it does | Asks first? |
+|------|--------------|-------------|
+| `list_calendars` | Your calendars: id, name, whether Pātaka can add events to it, time zone | no |
+| `events` | Events in a time range (a week from now unless given), soonest first, optionally matching some words. Shows how many guests an event has, never who they are | no |
+| `event` | One event in full, with its description (cut at about 4 KB) | no |
+| `create_event` | Add an event: title, start, end (an hour, or the one day, if left out), place, notes, pop-up reminders. **Nobody is invited and nobody is emailed** | in auto mode |
+| `update_event` | Change an event Pātaka added | in auto mode |
+| `delete_event` | Delete an event Pātaka added | always |
+
+Times are `2026-12-03` for a whole day, or `2026-12-03T14:30` in the calendar's own time zone (an offset such as `+13:00` works too). Events Pātaka adds carry a private mark, and `update_event` and `delete_event` refuse every other event: invitations from other people, and anything you made yourself. Every change goes to Google with `sendUpdates=none`, so Google emails nobody.
+
+In auto mode every change asks, until you answer **Yes, and don't ask again** for that tool. The request to add an event usually comes from an email or an invitation, which can carry instructions aimed at Claude. Deleting asks every time.
+
+While a calendar is connected, `pataka claude` switches off claude.ai connectors (such as Google Calendar) for its sessions, because they would read your calendar on Anthropic's side, unredacted.
+
+### Undo
+
+Every change is written to the audit log. Its entry number appears in the tool's result, and in `pataka audit show` (as `calendar-create`, `calendar-update` and `calendar-delete`):
+
+```bash
+pataka calendar undo 42
+```
+
+This removes an event Claude added, puts back an event it changed, or makes a deleted event again (with a new id). What an event looked like before a change is kept encrypted in `calendar.ptk` for this, and is forgotten on `disconnect`.
+
+### What goes where
+
+- **Anthropic** never sees your calendar unredacted. Pātaka Calendar's results are redacted on your computer, with your kaupapa and lists, before Claude Code receives them, whichever app runs Claude Code.
+- **Google** receives real values: the title, place and notes of the events Claude adds, over TLS. Pātaka talks only to Google's sign-in service and the Calendar API, and to no other host.
+- **The audit log** holds the action, the event id and a keyed hash of the calendar's id. It never holds titles, places, times or guests.
+- **Claude Code's transcripts** (`~/.claude/projects`) hold what it read, as they do for mail.
+
+### Limits
+
+- Google Calendar only, for now. Pātaka cannot invite guests, answer invitations, or change events it did not add.
+- A time without an offset in a search range (`from`, `to`) is read in this computer's time zone. A new event's times are read in the calendar's own time zone.
+- Connecting needs a browser on the same computer as Pātaka, and your own client in Google Cloud.
+- Do not add another MCP server called `pataka-calendar` to your Claude Code settings.
+
 ## Check what was sent
 
 To see exactly what leaves your computer, start `pataka claude` with a request log:

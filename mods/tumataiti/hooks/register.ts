@@ -188,6 +188,7 @@ function describeCall(tool: string, args: Record<string, unknown>): string {
   const path = args.file_path ?? args.notebook_path ?? args.path
   if (typeof path === 'string' && path) return `"${path.split('/').pop()}"`
   if (tool.startsWith('mcp__pataka-mail__')) return 'An email from Pātaka Mail'
+  if (tool.startsWith('mcp__pataka-calendar__')) return 'A calendar entry from Pātaka Calendar'
   if (typeof args.url === 'string' && args.url) return `"${args.url}"`
   return `The ${tool} result`
 }
@@ -208,13 +209,14 @@ function sourceOf(blocks: Block[], tool: string | undefined): string | undefined
   return tool ? describeCall(tool, {}) : undefined
 }
 
-const MAIL_PREFIX = 'mcp__pataka-mail__'
+/** Pātaka's own MCP servers: their results were redacted by Pātaka already. */
+const LOCAL_PREFIXES = ['mcp__pataka-mail__', 'mcp__pataka-calendar__']
 
 /** A tool result from the mail tools, by its call or else the row's tool. */
 function isMailResult(b: Block, originTool: string | undefined): boolean {
   if (b.type !== 'tool_result') return false
   const tool = (typeof b.tool_use_id === 'string' ? toolCalls.get(b.tool_use_id)?.tool : undefined) ?? originTool
-  return typeof tool === 'string' && tool.startsWith(MAIL_PREFIX)
+  return typeof tool === 'string' && LOCAL_PREFIXES.some(p => tool.startsWith(p))
 }
 
 async function redactTexts($: Dollar, texts: string[]): Promise<Redacted> {

@@ -17,6 +17,7 @@
 pub mod agent_proxy;
 pub mod audit;
 pub mod authors;
+pub mod calendar;
 pub mod claude_hooks;
 pub mod crypto;
 pub mod error;

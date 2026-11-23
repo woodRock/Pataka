@@ -82,6 +82,17 @@ Limits: Claude Code stores its own session transcripts locally, unencrypted (`~/
 
 Limits: an MCP server with the same name (`pataka-mail`) configured by hand in Claude Code's settings could conflict with Pātaka's. In the Claude desktop app, only mail results are redacted by Pātaka unless the Tūmataiti mod is installed.
 
+### Pātaka Calendar (Claude Code and Google Calendar)
+
+`pataka claude` can give Claude Code tools to read the person's Google Calendar and add events to it (`docs/CLAUDE-CODE.md`, "Calendar"). It runs exactly like the mail server, at `{base}/pataka/calendar` (found through `PATAKA_CALENDAR_URL`), with the same restoring, redacting, `Origin` and session checks, and its results are treated by the proxy and the mod as already redacted.
+
+- **Account.** The person's own OAuth client ("Desktop app") from Google Cloud, so no third party's app is involved. Sign-in uses the loopback redirect with PKCE (S256) and a random `state`; the listener accepts only that `state` and closes after one code. Scopes are `calendar.events` and `calendar.calendarlist.readonly`, never full calendar access. The client and the lasting grant are stored in `calendar.ptk`, encrypted with the data key; access tokens are held in memory only and dropped on lock. `disconnect` revokes the grant at Google.
+- **Hosts.** Google's OAuth token and revoke endpoints and the Calendar API, over TLS. Redirects are not followed.
+- **No sending.** Events are created without attendees, and every change carries `sendUpdates=none`, so Google emails nobody.
+- **Own events only.** Events Pātaka creates carry a private extended property, and get hex ids that pass redaction unchanged. `update_event` and `delete_event` refuse any event without that property.
+- **Prompt injection.** Calendar entries are labelled as untrusted for the model. The guards ask for every change in auto mode (until "don't ask again"), and for every `delete_event`, which is never "always allowed".
+- **Audit and undo.** Each change is logged with its action, the event id and a keyed hash of the calendar id. Titles, places, times and guests are never logged. What an event was before a change or deletion is kept in `calendar.ptk` for `pataka calendar undo`, and cleared on disconnect.
+
 ### Subscriptions through Claude Code and Codex
 
 Pātaka can use a Claude or ChatGPT subscription by running the vendor's own signed-in command-line app (`claude` or `codex`), the way T3 Code does. Pātaka never handles that login; the app keeps its own credentials. Each message starts a fresh run:

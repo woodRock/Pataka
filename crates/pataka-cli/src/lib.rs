@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+mod calendar;
 mod claude;
 mod config;
 mod ctx;
@@ -69,6 +70,11 @@ enum Cmd {
         action: HooksCmd,
     },
     /// Pātaka Mail: let Claude Code read and organise your mailbox over IMAP.
+    /// Pātaka Calendar: let Claude Code read your Google Calendar and add events to it.
+    Calendar {
+        #[command(subcommand)]
+        action: CalendarCmd,
+    },
     Mail {
         #[command(subcommand)]
         action: MailCmd,
@@ -188,6 +194,39 @@ enum MailCmd {
 }
 
 #[derive(Subcommand)]
+enum CalendarCmd {
+    /// Connect your Google Calendar: reads your own OAuth client file, then you sign in to Google in your browser.
+    Connect {
+        /// The OAuth client file ("Desktop app") downloaded from Google Cloud (asked for if not given).
+        #[arg(long)]
+        client: Option<std::path::PathBuf>,
+        /// Your Google address, to pick the account on Google's sign-in page.
+        #[arg(long)]
+        email: Option<String>,
+        /// Print the sign-in address instead of opening the browser.
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Forget the stored account and revoke Pātaka's access at Google.
+    Disconnect,
+    /// Is a calendar connected?
+    Status,
+    /// Reverse one change Claude made, by its audit entry number.
+    Undo { entry: u64 },
+    /// Offer pataka-calendar to every Claude Code (terminal and the Claude desktop app), through the service.
+    Register {
+        /// Leave claude.ai connectors (such as Google Calendar) switched on.
+        #[arg(long)]
+        keep_connectors: bool,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Stop offering pataka-calendar to every Claude Code (`pataka claude` still offers it).
+    Unregister,
+}
+
+#[derive(Subcommand)]
 enum HooksCmd {
     /// Add the hooks (asks first).
     Install {
@@ -258,8 +297,24 @@ pub fn run() -> i32 {
             MailCmd::Disconnect => mail::disconnect(),
             MailCmd::Status => mail::status(),
             MailCmd::Undo { entry } => mail::undo(entry),
-            MailCmd::Register { keep_connectors, yes } => service::mail_register(true, !keep_connectors, yes),
-            MailCmd::Unregister => service::mail_register(false, false, true),
+            MailCmd::Register { keep_connectors, yes } => {
+                service::server_register(service::Server::Mail, true, !keep_connectors, yes)
+            }
+            MailCmd::Unregister => service::server_register(service::Server::Mail, false, false, true),
+        },
+        Cmd::Calendar { action } => match action {
+            CalendarCmd::Connect {
+                client,
+                email,
+                no_browser,
+            } => calendar::connect(client, email, no_browser),
+            CalendarCmd::Disconnect => calendar::disconnect(),
+            CalendarCmd::Status => calendar::status(),
+            CalendarCmd::Undo { entry } => calendar::undo(entry),
+            CalendarCmd::Register { keep_connectors, yes } => {
+                service::server_register(service::Server::Calendar, true, !keep_connectors, yes)
+            }
+            CalendarCmd::Unregister => service::server_register(service::Server::Calendar, false, false, true),
         },
         Cmd::Status => config::status(),
         Cmd::Hook { which } => match which.as_str() {

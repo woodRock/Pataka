@@ -44,3 +44,11 @@ test('mail results keep their placeholders; other tool results are still escaped
   // The mail row never went to the service to be redacted again.
   expect(calls).toEqual([[`notes: ${PERSON}`]])
 })
+
+test('calendar results keep their placeholders too', async ($, on) => {
+  const calls = fakeService(on)
+  const session = mock.session(on)
+  await $.session.append(row(`- event 1 · Hui with ${PERSON}`, 'c1', 'mcp__pataka-calendar__events') as never)
+  expect(storedText(session, 0)).toBe(`- event 1 · Hui with ${PERSON}`)
+  expect(calls).toEqual([])
+})

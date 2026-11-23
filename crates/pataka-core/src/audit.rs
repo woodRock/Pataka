@@ -50,6 +50,11 @@ pub struct Entry {
     /// Omitted when empty, so older entries hash exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mail: Option<serde_json::Value>,
+    /// Pātaka Calendar: what a change did (event ids, hashed calendar
+    /// references, a reference to an encrypted snapshot), so it can be
+    /// undone. Never titles, places, times or attendees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<serde_json::Value>,
     pub prev: String,
     pub hash: String,
 }
