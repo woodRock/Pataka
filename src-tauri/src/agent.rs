@@ -64,6 +64,8 @@ pub struct Running {
     decided: Mutex<HashMap<String, String>>,
     /// The assistant message this turn writes into.
     turn: Mutex<Option<String>>,
+    /// Claude Code's session id, once known: its saved tool results may be read.
+    session: Mutex<Option<String>>,
     /// The session's flag-level settings file, removed with the agent.
     _settings: pataka_core::claude_hooks::SettingsFile,
 }
@@ -381,6 +383,7 @@ async fn spawn(
         pending: Mutex::new(HashMap::new()),
         decided: Mutex::new(HashMap::new()),
         turn: Mutex::new(None),
+        session: Mutex::new(info.session_id.clone()),
         _settings: settings,
     });
     running
@@ -491,6 +494,7 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
     match v["type"].as_str().unwrap_or("") {
         "system" if v["subtype"] == "init" => {
             if let Some(sid) = v["session_id"].as_str() {
+                *run.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid.to_string());
                 let st = app.state::<AppState>();
                 let _ = st.with_session(|s| {
                     let mut c = st.store.load_conversation(&s.key, korero)?;
@@ -627,7 +631,8 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
                 // Pātaka's guards ask whatever the mode or earlier answers.
                 // Auto mode makes ordinary mail and calendar changes without
                 // asking; trash, bulk changes and deletions still ask.
-                let guard = guards::review_tool(&tool, &r["input"], &run.workspace);
+                let session = run.session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let guard = guards::review_session_tool(&tool, &r["input"], &run.workspace, session.as_deref());
                 if guard.is_none() {
                     let how = if run.mode == "auto" {
                         Some("auto mode")

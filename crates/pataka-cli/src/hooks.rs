@@ -306,13 +306,17 @@ pub fn hook_pretool() -> Result<i32> {
         }
         return Ok(0);
     }
-    // The inbox-triage skill reads the person's own setup on every run.
+    // The inbox-triage setup, and long tool results this session saved.
+    let session = input["session_id"].as_str();
     if tool == "Read"
         && input["tool_input"]["file_path"]
             .as_str()
-            .is_some_and(guards::is_triage_setup)
+            .is_some_and(|p| guards::free_read(p, session))
     {
-        println!("{}", allow("Pātaka allows reading your inbox-triage setup."));
+        println!(
+            "{}",
+            allow("Pātaka allows reading this: your own setup, or this session's saved results.")
+        );
         return Ok(0);
     }
     if defers_to_session(&input) {
