@@ -295,9 +295,48 @@ pub fn is_triage_setup(path: &str) -> bool {
         && std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_file())
 }
 
+/// A file where Claude Code saved a long tool result of session `session`
+/// (`~/.claude/projects/<project>/<session>/tool-results/<file>`), which it
+/// reads back to see the rest. Only that session's own files count, and only
+/// real files, judged by where they really are.
+pub fn is_session_tool_result(path: &str, session: &str) -> bool {
+    if session.is_empty() || session.contains(['/', '\\']) || session.starts_with('.') {
+        return false;
+    }
+    let Some(h) = home() else { return false };
+    let Ok(projects) = h.join(".claude").join("projects").canonicalize() else {
+        return false;
+    };
+    let p = Path::new(path);
+    if !p.is_absolute() || !std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file()) {
+        return false;
+    }
+    let Ok(real) = p.canonicalize() else { return false };
+    let Ok(rest) = real.strip_prefix(&projects) else {
+        return false;
+    };
+    let parts: Vec<_> = rest
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.len() == 4 && parts[1] == session && parts[2] == "tool-results"
+}
+
+/// A file a `Read` may open outside the project folder without asking: the
+/// inbox-triage setup, or one of this session's saved tool results.
+pub fn free_read(path: &str, session: Option<&str>) -> bool {
+    is_triage_setup(path) || session.is_some_and(|s| is_session_tool_result(path, s))
+}
+
 /// Why this tool call must be approved, if it must (`None`: Pātaka's guards
 /// have no objection).
 pub fn review_tool(tool: &str, input: &Value, workspace: &Path) -> Option<String> {
+    review_session_tool(tool, input, workspace, None)
+}
+
+/// `review_tool` for a call from Claude Code session `session`, which may
+/// read its own saved tool results.
+pub fn review_session_tool(tool: &str, input: &Value, workspace: &Path, session: Option<&str>) -> Option<String> {
     if is_local_server_tool(tool) {
         return review_local(tool, input, Some(workspace));
     }
@@ -310,7 +349,7 @@ pub fn review_tool(tool: &str, input: &Value, workspace: &Path) -> Option<String
         "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "NotebookRead" | "Glob" | "Grep" | "LS" => {
             for key in ["file_path", "notebook_path", "path"] {
                 if let Some(p) = input[key].as_str().filter(|p| !p.is_empty()) {
-                    if tool == "Read" && is_triage_setup(p) {
+                    if tool == "Read" && free_read(p, session) {
                         continue;
                     }
                     if outside(p, workspace) {
@@ -498,6 +537,48 @@ mod tests {
         assert!(review_tool("mcp__pataka-mail__something_new", &json!({"ids": ids(1)}), &ws()).is_some());
         assert!(!is_mail_mutation("mcp__pataka-mail__search"));
         assert!(!is_mail_mutation("mcp__slack__send"));
+    }
+
+    #[test]
+    fn only_this_sessions_tool_results_are_read_freely() {
+        let Some(h) = home() else { return };
+        let projects = h.join(".claude").join("projects");
+        if !projects.is_dir() {
+            return;
+        }
+        let sid = format!("pataka-test-{}", std::process::id());
+        let other = format!("{sid}-other");
+        let dir = projects.join("-pataka-guard-test");
+        let mine = dir.join(&sid).join("tool-results");
+        let theirs = dir.join(&other).join("tool-results");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&theirs).unwrap();
+        let file = mine.join("mcp-pataka-mail-thread-1.txt");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::write(theirs.join("a.txt"), b"x").unwrap();
+        let read = |p: &Path, s: Option<&str>| {
+            review_session_tool("Read", &json!({"file_path": p.display().to_string()}), &ws(), s)
+        };
+        assert!(read(&file, Some(&sid)).is_none());
+        // Another session's results, no session, and other tools still ask.
+        assert!(read(&theirs.join("a.txt"), Some(&sid)).is_some());
+        assert!(read(&file, None).is_some());
+        assert!(read(&file, Some("..")).is_some());
+        assert!(review_session_tool(
+            "Edit",
+            &json!({"file_path": file.display().to_string()}),
+            &ws(),
+            Some(&sid)
+        )
+        .is_some());
+        // A link inside the folder cannot lead elsewhere.
+        #[cfg(unix)]
+        {
+            let link = mine.join("link.txt");
+            std::os::unix::fs::symlink(h.join(".zshrc"), &link).unwrap();
+            assert!(read(&link, Some(&sid)).is_some());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
