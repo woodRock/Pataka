@@ -123,7 +123,7 @@ impl Ctx {
             if let Ok(c) = self.store.load_conversation(&self.key, &id) {
                 if c.agent
                     .as_ref()
-                    .is_some_and(|a| a.mode == "terminal" && a.workspace == folder)
+                    .is_some_and(|a| a.mode == model::TERMINAL_AGENT_MODE && a.workspace == folder)
                 {
                     return Ok(c);
                 }
@@ -147,7 +147,7 @@ impl Ctx {
             agent: Some(AgentInfo {
                 workspace: folder,
                 session_id: None,
-                mode: "terminal".into(),
+                mode: model::TERMINAL_AGENT_MODE.into(),
             }),
         };
         self.store.save_conversation(&self.key, &c)?;

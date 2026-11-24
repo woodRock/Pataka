@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod calendar_settings;
 pub mod commands;
 pub mod mail_settings;
 pub mod state;
@@ -14,8 +15,8 @@ pub mod terminal;
 
 // The engine lives in pataka-core, shared with the `pataka` command.
 pub use pataka_core::{
-    agent_proxy, audit, claude_hooks, crypto, error, guards, mail, model, model_install, providers, redaction,
-    sovereignty, store, student,
+    agent_proxy, audit, calendar, claude_hooks, crypto, error, extract, guards, mail, model, model_install, providers,
+    redaction, sovereignty, store, student,
 };
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -47,6 +48,9 @@ pub fn run() {
                 .inner_size(1180.0, 800.0)
                 .min_inner_size(720.0, 520.0)
                 .on_navigation(allowed_navigation)
+                // Dropped files reach the page as File objects, so their
+                // bytes go to `extract_attachment`; no path is handed over.
+                .disable_drag_drop_handler()
                 .build()?;
             Ok(())
         })
@@ -66,6 +70,9 @@ pub fn run() {
             commands::fetch_models,
             commands::save_kaupapa,
             commands::list_conversations,
+            commands::search_conversations,
+            commands::set_pinned,
+            commands::set_guide_seen,
             commands::create_conversation,
             commands::get_conversation,
             commands::update_conversation,
@@ -85,7 +92,16 @@ pub fn run() {
             agent::agent_permission,
             agent::agent_interrupt,
             agent::agent_set_mode,
+            agent::agent_set_folder,
+            agent::agent_changes,
+            agent::agent_revert,
             mail_settings::mail_status,
+            calendar_settings::calendar_status,
+            calendar_settings::calendar_connect,
+            calendar_settings::calendar_disconnect,
+            calendar_settings::calendar_register,
+            commands::audit_undo,
+            commands::extract_attachment,
             mail_settings::mail_connect,
             mail_settings::mail_disconnect,
             mail_settings::mail_register,

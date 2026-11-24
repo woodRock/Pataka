@@ -45,6 +45,10 @@ const state = {
   permissions: {}, // agent permission requests waiting, by kōrero
   agentNote: {}, // last proxy summary, by kōrero
   providerFilter: false,
+  editing: null, // { id, korero } while the person edits a sent message
+  attachments: [], // files read for the next message: { name, kind, text, bytes, truncated }
+  reading: 0, // files still being read
+  pinned: new Set(), // ids of pinned kōrero
 };
 
 // ------------------------------------------------------------ utilities
@@ -254,23 +258,75 @@ async function enterApp() {
   await refreshList();
   if (state.list.length) await openKorero(state.list[0].id);
   else showEmpty();
+  if (!state.settings.guideSeen) openGuide();
 }
 
 // ------------------------------------------------------------ sidebar
 
 async function refreshList() {
-  state.list = await call('list_conversations');
+  const q = $('korero-search').value.trim();
+  state.list = q ? await call('search_conversations', { query: q }) : await call('list_conversations');
+  // Pins are known from the whole list; a search shows only some kōrero.
+  if (!q) state.pinned = new Set(state.list.filter((k) => k.pinned).map((k) => k.id));
+  renderList(q);
+}
+
+function renderList(q = '') {
   const nav = $('korero-list');
   nav.replaceChildren();
-  for (const k of state.list) {
-    const item = el('button', {
-      class: 'korero-item' + (state.current && state.current.id === k.id ? ' active' : ''),
-      title: k.title,
-      onclick: () => attempt(() => openKorero(k.id)),
-    }, el('span', { class: 't', text: k.title }), k.classification === 'tapu' ? el('span', { class: 'pill tapu', text: 'tapu' }) : null);
-    nav.append(item);
+  if (q && !state.list.length) {
+    nav.append(el('div', { class: 'list-empty', text: `No kōrero mention “${q}”.` }));
+    return;
   }
+  const item = (k) => el('button', {
+    class: 'korero-item' + (state.current && state.current.id === k.id ? ' active' : ''),
+    title: k.title,
+    'data-id': k.id,
+    onclick: () => attempt(() => openKorero(k.id)),
+  },
+  el('span', { class: 'k-main' },
+    el('span', { class: 't', text: k.title }),
+    k.snippet ? el('span', { class: 'snip', text: k.snippet }) : null),
+  k.pinned && !q ? el('span', { class: 'pin', text: '📌', title: 'Pinned', 'aria-label': 'Pinned' }) : null,
+  k.classification === 'tapu' ? el('span', { class: 'pill tapu', text: 'tapu' }) : null);
+  const pinned = q ? [] : state.list.filter((k) => k.pinned);
+  if (pinned.length) {
+    nav.append(el('div', { class: 'list-head', text: 'Pinned' }), ...pinned.map(item));
+    nav.append(el('div', { class: 'list-head', text: 'Recent' }));
+  }
+  nav.append(...state.list.filter((k) => q || !k.pinned).map(item));
 }
+
+let searchTimer;
+$('korero-search').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => attempt(refreshList), 150);
+});
+$('korero-search').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('korero-search').value) {
+    e.preventDefault();
+    $('korero-search').value = '';
+    attempt(refreshList);
+  } else if (e.key === 'Enter' && state.list.length) {
+    e.preventDefault();
+    attempt(() => openKorero(state.list[0].id));
+  }
+});
+
+function updatePinButton() {
+  $('pin-korero').textContent = state.current && state.pinned.has(state.current.id) ? 'Unpin' : 'Pin to top';
+}
+
+$('pin-korero').addEventListener('click', () => attempt(async () => {
+  closeMenu();
+  if (!state.current) return;
+  const pinned = !state.pinned.has(state.current.id);
+  await call('set_pinned', { id: state.current.id, pinned });
+  if (pinned) state.pinned.add(state.current.id);
+  else state.pinned.delete(state.current.id);
+  await refreshList();
+  updatePinButton();
+}));
 
 async function newKorero(classification) {
   const c = await call('create_conversation', { classification });
@@ -283,7 +339,6 @@ $('new-noa').addEventListener('click', () => attempt(() => newKorero('noa')));
 $('new-tapu').addEventListener('click', () => attempt(() => newKorero('tapu')));
 $('new-agent').addEventListener('click', () => attempt(async () => {
   const c = await call('agent_create', { workspace: null });
-  if (!c) return;
   await refreshList();
   await openKorero(c.id);
   if (!state.settings.providers.some(isAgentProvider)) {
@@ -291,6 +346,20 @@ $('new-agent').addEventListener('click', () => attempt(async () => {
     await openConnect();
   }
   $('input').focus();
+}));
+$('agent-folder').addEventListener('click', () => attempt(async () => {
+  const c = state.current;
+  if (!c?.agent) return;
+  if (c.agent.sessionId && !(await ask(
+    'The agent will start a new session in the folder you choose. This kōrero\'s messages stay, but the agent will not remember them.',
+    'Choose a folder',
+  ))) return;
+  const v = await call('agent_set_folder', { id: c.id, workspace: null });
+  if (!v) return;
+  state.current = v;
+  renderKorero();
+  await refreshList();
+  toast('The agent works in this folder from the next message.');
 }));
 $('lock-now').addEventListener('click', () => attempt(lockNow));
 
@@ -318,10 +387,14 @@ function showEmpty() {
 }
 
 async function openKorero(id) {
+  if (state.editing && state.editing.korero !== id) cancelEdit();
+  // Reloading the same kōrero (when a reply ends) keeps the strip.
+  if (state.current?.id !== id) hidePrecheck();
   state.current = await call('get_conversation', { id });
   if (state.current.streaming) state.streaming.add(id);
   renderKorero();
   await refreshList();
+  updatePinButton();
 }
 
 function renderKorero() {
@@ -334,10 +407,21 @@ function renderKorero() {
   $('korero-title').value = c.title;
   for (const b of document.querySelectorAll('.class-toggle button')) b.classList.toggle('on', b.dataset.cls === c.classification);
   show('agent-folder', !!c.agent);
+  show('agent-changes', !!c.agent && !['terminal', 'service'].includes(c.agent.mode));
   show('agent-mode', !!c.agent);
   if (c.agent) {
-    $('agent-folder').textContent = c.agent.workspace;
-    $('agent-folder').title = `The agent works in ${c.agent.workspace}`;
+    // Kōrero that hold terminal sessions' placeholders keep their folder.
+    const terminal = ['terminal', 'service'].includes(c.agent.mode);
+    const folder = $('agent-folder');
+    folder.disabled = terminal;
+    folder.classList.toggle('unset', !c.agent.workspace);
+    if (c.agent.workspace) {
+      folder.textContent = c.agent.workspace;
+      folder.title = terminal ? `Claude Code works in ${c.agent.workspace}` : `The agent works in ${c.agent.workspace}. Click to choose another folder.`;
+    } else {
+      folder.textContent = 'Choose a folder…';
+      folder.title = 'No project folder yet: the agent works in a private, empty folder of its own.';
+    }
     // Terminal kōrero (from `pataka claude`) have no app mode; the app asks first.
     $('agent-mode').value = ['manual', 'acceptEdits', 'plan', 'auto'].includes(c.agent.mode) ? c.agent.mode : 'manual';
   }
@@ -358,20 +442,99 @@ function routeMeta(m) {
   return parts.join(' · ');
 }
 
+/// The text of a message as the person would copy it: what they typed, or
+/// the reply with real values filled in. It stays on this device.
+function messageCopyText(m) {
+  if (m.role === 'user') return m.text || '';
+  if (m.items?.length) return m.items.filter((i) => i.kind === 'text').map((i) => i.text).join('\n\n');
+  return m.display || m.text || '';
+}
+
+async function copyText(text) {
+  if (!text) throw new Error('There is nothing to copy yet.');
+  await navigator.clipboard.writeText(text);
+  toast('Copied, with real values. The clipboard is not encrypted.');
+}
+
+async function copyLastReply() {
+  const m = [...(state.current?.messages || [])].reverse().find((x) => x.role === 'assistant');
+  await copyText(m ? messageCopyText(m) : '');
+}
+
+function lastUser() {
+  return [...(state.current?.messages || [])].reverse().find((x) => x.role === 'user');
+}
+
+function messageActions(m) {
+  const c = state.current;
+  const busy = state.streaming.has(c.id);
+  const chat = !c.agent;
+  const bar = el('div', { class: 'msg-actions' },
+    el('button', { type: 'button', text: 'Copy', title: 'Copy this message, with real values', onclick: () => attempt(() => copyText(messageCopyText(m))) }));
+  if (chat && !busy && m.role === 'user') {
+    bar.append(el('button', { type: 'button', text: 'Edit', title: 'Change this message and send it again', onclick: () => startEdit(m) }));
+  }
+  if (chat && !busy && m.role === 'assistant' && isLast(m)) {
+    bar.append(el('button', { type: 'button', text: 'Retry', title: 'Ask for this reply again', onclick: () => attempt(retryLast) }));
+  }
+  return bar;
+}
+
+function startEdit(m) {
+  state.editing = { id: m.id, korero: state.current.id };
+  const { typed, files } = splitAttachments(m.text);
+  $('input').value = typed;
+  state.attachments = files.map((f) => {
+    const truncated = f.name.endsWith(' (only the start: it is long)');
+    return { name: truncated ? f.name.slice(0, -' (only the start: it is long)'.length) : f.name, kind: 'text', text: f.text, bytes: new Blob([f.text]).size, truncated };
+  });
+  renderAttachments();
+  show('edit-bar', true);
+  for (const n of document.querySelectorAll('.msg.editing')) n.classList.remove('editing');
+  document.querySelector(`.msg[data-id="${CSS.escape(m.id)}"]`)?.classList.add('editing');
+  $('input').focus();
+  $('input').setSelectionRange($('input').value.length, $('input').value.length);
+}
+
+function cancelEdit(clear = true) {
+  if (!state.editing) return;
+  state.editing = null;
+  show('edit-bar', false);
+  for (const n of document.querySelectorAll('.msg.editing')) n.classList.remove('editing');
+  if (clear) {
+    $('input').value = '';
+    state.attachments = [];
+    renderAttachments();
+  }
+}
+$('edit-cancel').addEventListener('click', () => cancelEdit());
+
+async function retryLast() {
+  const u = lastUser();
+  if (!u) return;
+  await submit(u.text, u.id);
+}
+
 function renderMessage(m) {
+  const wrap = renderMessageBody(m);
+  if (state.current && (m.role === 'user' || m.text || m.items?.length || m.error)) wrap.append(messageActions(m));
+  if (state.editing?.id === m.id) wrap.classList.add('editing');
+  return wrap;
+}
+
+function renderMessageBody(m) {
   const wrap = el('div', { class: `msg ${m.role}`, 'data-id': m.id });
   const put = chipText(state.current?.redactions);
   if (m.role === 'user') {
     // A redacted message is shown as it was sent, with placeholders as chips.
     const sent = m.outbound !== null && m.outbound !== undefined && m.outbound !== m.text;
     const bubble = el('div', { class: 'bubble' });
-    if (sent) put(bubble, m.outbound);
-    else bubble.textContent = m.display;
+    renderUserText(bubble, sent ? m.outbound : m.display, sent ? put : (p, t) => p.append(t));
     wrap.append(bubble);
     const meta = el('div', { class: 'meta' });
     if (m.trust) meta.append(el('span', { text: `→ ${routeMeta(m)} · ${TRUST_TEXT[m.trust] || m.trust}` }));
     const n = sent ? countPlaceholders(m.outbound) : 0;
-    if (n) meta.append(el('span', { class: 'redacted-note', text: `${n} item${n === 1 ? '' : 's'} replaced before sending` }));
+    if (n) meta.append(redactionSummary(m.outbound, n));
     wrap.append(meta);
   } else if (state.current?.agent) {
     wrap.append(renderAgentReply(m));
@@ -397,6 +560,200 @@ function renderMessage(m) {
   }
   return wrap;
 }
+
+// ------------------------------------------------------------ attachments
+
+// How an attached file sits in a message: the model reads it as text, and
+// the window shows it folded away.
+const ATTACH_RE = /\n*--- Attached file: (.+?) ---\n([\s\S]*?)\n--- End of \1 ---/g;
+
+function attachmentBlock(a) {
+  const note = a.truncated ? ' (only the start: it is long)' : '';
+  return `\n\n--- Attached file: ${a.name}${note} ---\n${a.text}\n--- End of ${a.name}${note} ---`;
+}
+
+/// A message's typed text and the files attached to it.
+function splitAttachments(text) {
+  const files = [];
+  const typed = (text || '').replace(ATTACH_RE, (_, name, body) => {
+    files.push({ name, text: body });
+    return '';
+  });
+  return { typed: typed.trim(), files };
+}
+
+function renderUserText(parent, text, put) {
+  let last = 0;
+  ATTACH_RE.lastIndex = 0;
+  let m;
+  while ((m = ATTACH_RE.exec(text))) {
+    if (m.index > last) put(parent, text.slice(last, m.index));
+    const pre = el('pre');
+    put(pre, m[2]);
+    const lines = m[2].split('\n').length;
+    parent.append(el('details', { class: 'attached' },
+      el('summary', { text: `📎 ${m[1]} · ${lines} line${lines === 1 ? '' : 's'}` }), pre));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) put(parent, text.slice(last));
+}
+
+function fmtSize(n) {
+  return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+
+function renderAttachments() {
+  const box = $('attachments');
+  const chips = state.attachments.map((a, i) => el('span', { class: 'att-chip', title: a.truncated ? 'Long: only the start is attached.' : `${a.text.length.toLocaleString()} characters of text` },
+    el('span', { text: `📎 ${a.name}` }),
+    el('span', { class: 'att-sub', text: `${a.kind === 'text' ? 'text' : a.kind.toUpperCase()} · ${fmtSize(a.bytes)}${a.truncated ? ' · cut short' : ''}` }),
+    el('button', { type: 'button', text: '×', title: `Remove ${a.name}`, 'aria-label': `Remove ${a.name}`, onclick: () => { state.attachments.splice(i, 1); renderAttachments(); } })));
+  if (state.reading) chips.push(el('span', { class: 'att-chip loading', text: `Reading ${state.reading} file${state.reading === 1 ? '' : 's'}…` }));
+  box.replaceChildren(...chips);
+  box.classList.toggle('hidden', !chips.length);
+  if (!state.reading) schedulePrecheck();
+}
+
+function toBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+const MAX_ATTACH = 20 * 1024 * 1024;
+
+async function readFiles(files) {
+  for (const f of files) {
+    if (f.size > MAX_ATTACH) {
+      toast(`${f.name} is ${fmtSize(f.size)}; Pātaka reads attachments up to 20 MB.`, true);
+      continue;
+    }
+    state.reading += 1;
+    renderAttachments();
+    try {
+      const a = await call('extract_attachment', { name: f.name, data: toBase64(await f.arrayBuffer()) });
+      state.attachments.push(a);
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      state.reading -= 1;
+      renderAttachments();
+    }
+  }
+}
+
+$('attach').addEventListener('click', () => $('attach-input').click());
+$('attach-input').addEventListener('change', () => {
+  const files = [...$('attach-input').files];
+  $('attach-input').value = '';
+  readFiles(files);
+});
+$('input').addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (!files.length) return;
+  e.preventDefault();
+  readFiles(files);
+});
+// Files dropped anywhere in the window are attached; nothing navigates away.
+let dragDepth = 0;
+window.addEventListener('dragenter', (e) => {
+  if (!e.dataTransfer?.types?.includes('Files')) return;
+  dragDepth += 1;
+  $('composer').classList.add('dropping');
+});
+window.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) $('composer').classList.remove('dropping');
+});
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  $('composer').classList.remove('dropping');
+  if ($('app').classList.contains('hidden')) return;
+  const files = [...(e.dataTransfer?.files || [])];
+  if (files.length) readFiles(files);
+});
+
+/// "3 items replaced before sending", opening to what each placeholder
+/// stands for and its kind. The real values come from this kōrero's vault.
+function redactionSummary(outbound, n) {
+  PLACEHOLDER_RE.lastIndex = 0;
+  const seen = [...new Set(outbound.match(PLACEHOLDER_RE) || [])];
+  const map = state.current?.redactions || {};
+  const rows = seen.map((ph) => {
+    const code = ph.slice(1, -1).replace(/_\d+$/, '').replace(/^YEAR \d{4}$/, 'DATE');
+    const real = Object.prototype.hasOwnProperty.call(map, ph) ? map[ph] : null;
+    return el('tr', {},
+      el('td', {}, el('mark', { text: ph })),
+      el('td', { text: catLabel(code) }),
+      el('td', { text: real ?? '(removed for good)' }));
+  });
+  return el('details', { class: 'redactions redacted-note' },
+    el('summary', { text: `${n} item${n === 1 ? '' : 's'} replaced before sending ▾` }),
+    el('table', {}, el('tbody', {}, ...rows)));
+}
+
+// ------------------------------------------------------------ pre-check while typing
+
+// A display preference for this computer: it holds no kōrero content.
+const precheckOn = () => { try { return localStorage.getItem('pataka.precheck') !== '0'; } catch { return true; } };
+let precheckTimer;
+let precheckSeq = 0;
+
+function schedulePrecheck() {
+  clearTimeout(precheckTimer);
+  precheckTimer = setTimeout(() => attempt(runPrecheck), 700);
+}
+
+function hidePrecheck() {
+  precheckSeq += 1;
+  $('precheck').classList.add('hidden');
+}
+
+async function runPrecheck() {
+  const text = ($('input').value.trim() + state.attachments.map(attachmentBlock).join('')).trim();
+  const p = currentProvider();
+  const model = $('model-select').value;
+  if (!precheckOn() || !text || !state.current || !p || !model || text.length > 60_000) return hidePrecheck();
+  const seq = ++precheckSeq;
+  const agent = !!state.current.agent;
+  const editing = !agent && state.editing?.korero === state.current.id ? state.editing.id : null;
+  let pv;
+  try {
+    pv = await call(agent ? 'agent_preview' : 'preview_message', agent
+      ? { id: state.current.id, text, providerId: p.id, model }
+      : { id: state.current.id, text, providerId: p.id, model, replaceFrom: editing });
+  } catch {
+    return hidePrecheck(); // the full check on Send says what is wrong
+  }
+  if (seq !== precheckSeq) return; // the text changed meanwhile
+  const box = $('precheck');
+  box.classList.toggle('blocked', pv.blocked);
+  if (pv.blocked) {
+    box.replaceChildren(el('span', { text: `This will not be sent: ${pv.blockReasons.join('; ')}.` }));
+  } else if (!pv.findings.length) {
+    box.replaceChildren(el('span', { class: 'muted', text: pv.leavesDevice
+      ? `Tūmataiti finds nothing to replace (${detectorText()}).`
+      : 'Stays on this device.' }));
+  } else {
+    const items = pv.findings.slice(0, 12).map((f) => el('span', {
+      class: `pc-item${f.action === 'flag' ? ' flag' : ''}`,
+      title: `${catLabel(f.category)} · ${foundBy(f)} · ${f.action}`,
+      text: f.replacement ? `${f.text} → ${f.replacement}` : `${f.text} (${f.action})`,
+    }));
+    const more = pv.findings.length > 12 ? el('span', { class: 'muted', text: `and ${pv.findings.length - 12} more` }) : null;
+    box.replaceChildren(el('span', { text: 'Tūmataiti will replace:' }), ...items, ...(more ? [more] : []));
+  }
+  box.classList.remove('hidden');
+}
+
+$('input').addEventListener('input', schedulePrecheck);
+$('precheck-on').addEventListener('change', () => {
+  try { localStorage.setItem('pataka.precheck', $('precheck-on').checked ? '1' : '0'); } catch { /* display preference only */ }
+  if (!$('precheck-on').checked) hidePrecheck();
+});
 
 function isLast(m) {
   const msgs = state.current.messages;
@@ -717,9 +1074,25 @@ function updateRoute() {
 // ------------------------------------------------------------ sending
 
 $('input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  if (e.isComposing) return;
+  if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     $('composer').requestSubmit();
+  } else if (e.key === 'Escape') {
+    if (state.current && state.streaming.has(state.current.id)) {
+      e.preventDefault();
+      $('stop').click();
+    } else if (state.editing) {
+      e.preventDefault();
+      cancelEdit();
+    }
+  } else if (e.key === 'ArrowUp' && !$('input').value && state.current && !state.current.agent
+      && !state.streaming.has(state.current.id)) {
+    const u = lastUser();
+    if (u) {
+      e.preventDefault();
+      startEdit(u);
+    }
   }
 });
 
@@ -730,13 +1103,21 @@ $('composer').addEventListener('submit', (e) => {
   // would send the message twice.
   if (submitting) return;
   submitting = true;
-  attempt(submit).finally(() => { submitting = false; });
+  const editing = state.editing && state.editing.korero === state.current?.id ? state.editing.id : null;
+  if (state.reading) {
+    submitting = false;
+    toast('Wait a moment: Pātaka is still reading the attached files.');
+    return;
+  }
+  const text = ($('input').value.trim() + state.attachments.map(attachmentBlock).join('')).trim();
+  attempt(() => submit(text, editing, true)).finally(() => { submitting = false; });
 });
 
 $('stop').addEventListener('click', () => attempt(() => call(state.current.agent ? 'agent_interrupt' : 'cancel_reply', { id: state.current.id })));
 
-async function submit() {
-  const text = $('input').value;
+/// Send `text`. With `replaceFrom` (a message of the person's), that message
+/// and everything after it are replaced: an edit, or a retried reply.
+async function submit(text, replaceFrom = null, fromComposer = false) {
   if (!text.trim()) return;
   if (!state.current) {
     const c = await call('create_conversation', { classification: 'noa' });
@@ -750,19 +1131,29 @@ async function submit() {
   $('route-note').textContent = 'Checking with Tūmataiti…';
   let preview;
   try {
-    preview = await call(agent ? 'agent_preview' : 'preview_message', { id: state.current.id, text, providerId, model });
+    preview = await call(agent ? 'agent_preview' : 'preview_message', agent
+      ? { id: state.current.id, text, providerId, model }
+      : { id: state.current.id, text, providerId, model, replaceFrom });
   } finally {
     updateRoute();
     updateStreamingUi();
   }
   let reviewed = false;
   if (preview.blocked || preview.needsReview) {
-    const go = await review(text, providerId, model, preview, agent ? 'agent_preview' : 'preview_message');
+    const go = await review(text, providerId, model, preview, agent ? 'agent_preview' : 'preview_message', agent ? null : replaceFrom);
     if (!go) return;
     reviewed = true;
   }
-  const view = await call(agent ? 'agent_send' : 'send_message', { id: state.current.id, text, providerId, model, reviewed });
-  $('input').value = '';
+  const view = await call(agent ? 'agent_send' : 'send_message', agent
+    ? { id: state.current.id, text, providerId, model, reviewed }
+    : { id: state.current.id, text, providerId, model, reviewed, replaceFrom });
+  if (fromComposer) {
+    $('input').value = '';
+    hidePrecheck();
+    state.attachments = [];
+    renderAttachments();
+    cancelEdit(false);
+  }
   state.streaming.add(view.id);
   state.current = view;
   renderKorero();
@@ -773,7 +1164,7 @@ const reviewCat = $('review-term-cat');
 reviewCat.replaceChildren(...[['PERSON', 'Person'], ['AFFILIATION', 'Affiliation'], ['ADDRESS', 'Place / address'], ['HEALTH', 'Health'], ['OTHER_ID', 'Other ID']]
   .map(([v, t]) => el('option', { value: v, text: t })));
 
-function review(text, providerId, model, preview, previewCmd = 'preview_message') {
+function review(text, providerId, model, preview, previewCmd = 'preview_message', replaceFrom = null) {
   return new Promise((resolve) => {
     const dlg = $('review');
     const render = (pv) => {
@@ -815,7 +1206,9 @@ function review(text, providerId, model, preview, previewCmd = 'preview_message'
     const focusSafe = (pv) => (pv.blocked ? dlg.querySelector('button[value=cancel]') : $('review-send')).focus();
     const refresh = async () => {
       state.current = await call('get_conversation', { id: state.current.id });
-      const pv = await call(previewCmd, { id: state.current.id, text, providerId, model });
+      const pv = await call(previewCmd, previewCmd === 'preview_message'
+        ? { id: state.current.id, text, providerId, model, replaceFrom }
+        : { id: state.current.id, text, providerId, model });
       render(pv);
       focusSafe(pv);
     };
@@ -903,6 +1296,7 @@ for (const tab of document.querySelectorAll('.tabs button')) {
     if (tab.dataset.tab === 'audit') attempt(loadAudit);
     if (tab.dataset.tab === 'claudecode') attempt(loadTerminal);
     if (tab.dataset.tab === 'mail') attempt(loadMail);
+    if (tab.dataset.tab === 'calendar') attempt(loadCalendar);
   });
 }
 
@@ -928,6 +1322,7 @@ function renderSettings() {
   $('policy-review').value = s.kaupapa.review;
   $('policy-on-device').checked = s.kaupapa.redactOnDevice;
   $('policy-use-model').checked = s.kaupapa.useModel;
+  $('precheck-on').checked = precheckOn();
   renderModel();
   // Kaitiaki lists
   const byCat = (cat) => s.kaupapa.gazetteer.filter((t) => t.category === cat).map((t) => t.term).join('\n');
@@ -1215,6 +1610,9 @@ function renderModelBanner() {
   }
   banner.classList.toggle('hidden', !show);
   $('model-banner-install').classList.toggle('hidden', !canInstall);
+  const bar = $('model-banner-bar');
+  bar.classList.toggle('hidden', !state.modelDownload);
+  if (state.modelDownload) bar.value = state.modelFraction || 0;
   $('model-banner-hide').classList.toggle('hidden', !!state.modelDownload);
 }
 
@@ -1261,6 +1659,7 @@ listen('model-progress', (ev) => {
   $('model-progress').textContent = `Downloading ${p.stage}: ${mb(p.done)} of ${mb(p.total)}`;
   if (state.model?.installed) return;
   state.modelDownload = `${p.stage}, ${mb(p.done)} of ${mb(p.total)}`;
+  state.modelFraction = p.total ? p.done / p.total : 0;
   renderModelBanner();
 });
 
@@ -1446,15 +1845,106 @@ async function loadAudit() {
   $('audit-rows').replaceChildren(...rows.map((e) => {
     const found = Object.entries(e.categories || {}).map(([k, v]) => `${v} ${k}`).join(', ');
     const dest = [e.provider, e.model, e.jurisdiction, e.trust].filter(Boolean).join(' · ');
+    const what = e.undo === 'mail' ? 'mail change' : 'calendar change';
     return el('tr', {},
       el('td', { text: fmtTime(e.ts) }),
-      el('td', { text: e.event + (e.detail ? ` (${e.detail})` : '') }),
+      el('td', { text: `${e.event}${e.detail ? ` (${e.detail})` : ''} · #${e.seq}` }),
       el('td', { text: dest }),
       el('td', { text: e.korero ? e.korero.slice(0, 8) : '' }),
       el('td', { text: found }),
-      el('td', { text: e.policyHash || '' }));
+      el('td', { text: e.policyHash || '' }),
+      el('td', {}, e.undo ? el('button', {
+        type: 'button',
+        text: 'Undo',
+        title: `Reverse this ${what}`,
+        onclick: (ev) => attempt(async () => {
+          if (!(await ask(`Undo entry ${e.seq} (${e.event})? Pātaka reverses the ${what} and logs the undo.`, 'Undo'))) return;
+          ev.target.disabled = true;
+          try {
+            toast(await call('audit_undo', { seq: e.seq }));
+          } finally {
+            await loadAudit();
+          }
+        }),
+      }) : null));
   }));
 }
+
+// ------------------------------------------------------------ Pātaka Calendar
+
+function renderCalendar(st) {
+  const box = $('cal-status');
+  box.className = `status-box ${st.connected ? 'ok' : ''}`;
+  box.replaceChildren(el('div', { text: st.connected
+    ? `Connected: Google Calendar (${st.email}).`
+    : 'No calendar is connected.' }));
+  if (st.connected) {
+    box.append(el('div', { text: st.registered
+      ? 'Offered to agent kōrero, pataka claude, and every Claude Code session, including the Claude desktop app\'s Code tab.'
+      : 'Offered to agent kōrero in this app and to pataka claude.' }));
+  }
+  show('cal-setup', !st.connected);
+  show('cal-connected', st.connected);
+  show('cal-register', st.connected && !st.registered);
+  show('cal-unregister', st.connected && st.registered);
+  $('cal-register').disabled = !st.serviceInstalled || !st.canRegister;
+  $('cal-register-hint').textContent = st.registered
+    ? 'Plain claude in a terminal and the Claude desktop app\'s Code tab reach your calendar through the Pātaka service. It must be running and unlocked.'
+    : !st.canRegister
+      ? 'To offer it to every Claude Code session, first install the pataka command in Settings → Claude Code.'
+      : !st.serviceInstalled
+        ? 'To offer it to every Claude Code session, first install the Pātaka service from a terminal: pataka service install'
+        : 'Offer it to every Claude Code session too, including plain claude in a terminal and the Claude desktop app\'s Code tab.';
+}
+
+async function loadCalendar() {
+  renderCalendar(await call('calendar_status'));
+}
+
+listen('calendar-signin', (ev) => {
+  const p = ev.payload;
+  const w = $('cal-waiting');
+  w.classList.remove('hidden');
+  w.replaceChildren(
+    el('span', { text: p.opened
+      ? 'Your browser is open at Google\'s sign-in page. Sign in and allow access to your calendar; Google warns that it has not verified the app, because it is your own client. Waiting for Google… '
+      : 'Open this address in your browser and sign in. Waiting for Google… ' }),
+    el('button', { type: 'button', text: 'Copy the address', onclick: () => attempt(() => copyText(p.url)) }));
+});
+
+$('cal-connect').addEventListener('click', () => attempt(async () => {
+  const btn = $('cal-connect');
+  btn.disabled = true;
+  try {
+    const st = await call('calendar_connect');
+    if (!st) return;
+    renderCalendar(st);
+    toast('Calendar connected.');
+  } finally {
+    btn.disabled = false;
+    $('cal-waiting').classList.add('hidden');
+  }
+}));
+
+$('cal-register').addEventListener('click', () => attempt(async () => {
+  const msg = 'Pātaka will add pataka-calendar to Claude Code\'s MCP servers (~/.claude.json), served by the Pātaka service on this computer. '
+    + 'It also switches off claude.ai connectors such as Google Calendar in Claude Code, because they read your calendar on Anthropic\'s side, unredacted.';
+  if (!(await ask(msg, 'Offer it'))) return;
+  renderCalendar(await call('calendar_register', { on: true }));
+  toast('Every Claude Code session now has your calendar, redacted.');
+}));
+
+$('cal-unregister').addEventListener('click', () => attempt(async () => {
+  renderCalendar(await call('calendar_register', { on: false }));
+}));
+
+$('cal-disconnect').addEventListener('click', () => attempt(async () => {
+  if (!(await ask('Disconnect the calendar? Pātaka asks Google to revoke its access and forgets it.', 'Disconnect'))) return;
+  const [st, revoked] = await call('calendar_disconnect');
+  renderCalendar(st);
+  toast(revoked ? 'Calendar disconnected, and Google has revoked the access.'
+    : 'Calendar disconnected. Google could not be reached: remove Pātaka\'s access in your Google Account (Security, Third-party connections).', !revoked);
+}));
 
 $('audit-verify').addEventListener('click', () => attempt(async () => {
   const v = await call('audit_verify');
@@ -1462,6 +1952,168 @@ $('audit-verify').addEventListener('click', () => attempt(async () => {
     ? `Chain intact: ${v.entries} entries.`
     : `Chain broken at entry ${v.firstBad} of ${v.entries}. The log has been changed outside Pātaka.`;
 }));
+
+// ------------------------------------------------------------ files an agent changed
+
+/// A line diff of `a` and `b` (longest common subsequence), with unchanged
+/// runs folded to three lines of context.
+function lineDiff(a, b) {
+  const x = a.split('\n');
+  const y = b.split('\n');
+  if (x.length * y.length > 4_000_000) return null;
+  const n = x.length;
+  const m = y.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) dp[i][j] = x[i] === y[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  }
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && x[i] === y[j]) { out.push([' ', x[i]]); i += 1; j += 1; }
+    else if (i < n && (j >= m || dp[i + 1][j] >= dp[i][j + 1])) { out.push(['-', x[i]]); i += 1; }
+    else { out.push(['+', y[j]]); j += 1; }
+  }
+  const changed = out.map((l) => l[0] !== ' ');
+  const near = (k) => changed.slice(Math.max(0, k - 3), k + 4).some(Boolean);
+  const pre = el('pre');
+  let skipped = 0;
+  const gap = () => {
+    if (skipped) pre.append(el('div', { class: 'diff-gap', text: `… ${skipped} unchanged line${skipped === 1 ? '' : 's'}` }));
+    skipped = 0;
+  };
+  out.forEach((l, k) => {
+    if (!near(k)) { skipped += 1; return; }
+    gap();
+    pre.append(el('div', { class: l[0] === '+' ? 'diff-add' : l[0] === '-' ? 'diff-del' : 'diff-same', text: `${l[0]} ${l[1]}` }));
+  });
+  gap();
+  return pre;
+}
+
+function renderChanges(files) {
+  const list = $('changes-list');
+  $('agent-changes').textContent = files.length ? `Changed files (${files.length})` : 'Changed files';
+  if (!files.length) {
+    list.replaceChildren(el('p', { class: 'muted', text: 'The agent has not changed any files in this kōrero yet.' }));
+    return;
+  }
+  list.replaceChildren(...files.map((f) => {
+    const what = !f.existed ? 'created' : !f.existsNow ? 'deleted' : 'changed';
+    let body;
+    if (f.existed && f.original !== null && f.current !== null) body = lineDiff(f.original, f.current) || el('p', { class: 'muted small', text: 'Too large to compare here.' });
+    else if (!f.existed && f.current !== null) body = el('pre', {}, ...f.current.split('\n').slice(0, 400).map((l) => el('div', { class: 'diff-add', text: `+ ${l}` })));
+    else if (!f.revertible) body = el('p', { class: 'muted small', text: 'Pātaka did not keep the original (it was large, or not text), so this file cannot be put back.' });
+    else body = el('p', { class: 'muted small', text: 'The file is not text, or is too large to show.' });
+    return el('details', { class: 'change' },
+      el('summary', { class: 'change-head' },
+        el('span', { class: 'cpath', text: f.relative, title: f.path }),
+        el('span', { class: 'muted small', text: `${what} · ${f.changes} change${f.changes === 1 ? '' : 's'} · ${fmtTime(f.lastAt)}` }),
+        f.revertible ? el('button', {
+          type: 'button',
+          text: f.existed ? 'Put back' : 'Remove',
+          title: f.existed ? 'Restore the file as it was before the agent changed it' : 'Delete this file the agent created',
+          onclick: (e) => {
+            e.preventDefault();
+            attempt(async () => {
+              const msg = f.existed
+                ? `Put ${f.relative} back as it was before the agent first changed it? Later changes to it are lost.`
+                : `Delete ${f.relative}? The agent created it in this kōrero.`;
+              if (!(await ask(msg, f.existed ? 'Put back' : 'Delete'))) return;
+              renderChanges(await call('agent_revert', { id: state.current.id, path: f.path }));
+              toast(f.existed ? `${f.relative} is back as it was.` : `${f.relative} is deleted.`);
+            });
+          },
+        }) : null),
+      body);
+  }));
+}
+
+$('agent-changes').addEventListener('click', () => attempt(async () => {
+  renderChanges(await call('agent_changes', { id: state.current.id }));
+  $('changes-dialog').showModal();
+}));
+
+// ------------------------------------------------------------ first-run guide
+
+function openGuide() {
+  const n = state.settings?.providers.length || 0;
+  $('guide-model-state').textContent = n ? `You have ${n} connected.` : '';
+  if ($('shortcuts-dialog').open) $('shortcuts-dialog').close();
+  if (!$('guide-dialog').open) $('guide-dialog').showModal();
+}
+
+$('guide-dialog').addEventListener('close', () => {
+  if (state.settings && !state.settings.guideSeen) {
+    state.settings.guideSeen = true;
+    attempt(() => call('set_guide_seen'));
+  }
+});
+$('open-guide').addEventListener('click', openGuide);
+$('guide-connect').addEventListener('click', () => attempt(async () => {
+  $('guide-dialog').close();
+  await openConnect();
+}));
+$('guide-lists').addEventListener('click', () => attempt(async () => {
+  $('guide-dialog').close();
+  await openSettings();
+  document.querySelector('.tabs button[data-tab="kaitiaki"]').click();
+}));
+$('guide-sample').addEventListener('click', () => attempt(async () => {
+  $('guide-dialog').close();
+  if (!state.current || state.current.agent) await newKorero('noa');
+  $('input').value = 'Kia ora, can you help me write to Aroha Ngata (aroha.ngata@example.nz, 021 555 0123) about the hui at 12 Marae Road, Rotorua?';
+  $('input').focus();
+  schedulePrecheck();
+}));
+
+// ------------------------------------------------------------ keyboard shortcuts
+
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+const MOD = MAC ? '⌘' : 'Ctrl';
+const SHORTCUTS = [
+  { keys: [MOD, 'N'], what: 'New kōrero', mod: true, key: 'n', run: () => newKorero('noa') },
+  { keys: [MOD, 'Shift', 'N'], what: 'New tapu kōrero', mod: true, shift: true, key: 'n', run: () => newKorero('tapu') },
+  { keys: [MOD, 'Shift', 'A'], what: 'New agent', mod: true, shift: true, key: 'a', run: () => $('new-agent').click() },
+  { keys: [MOD, 'K'], what: 'Search kōrero', mod: true, key: 'k', run: () => { $('korero-search').focus(); $('korero-search').select(); } },
+  { keys: [MOD, 'Shift', '↑'], what: 'Previous kōrero', mod: true, shift: true, key: 'arrowup', run: () => stepKorero(-1) },
+  { keys: [MOD, 'Shift', '↓'], what: 'Next kōrero', mod: true, shift: true, key: 'arrowdown', run: () => stepKorero(1) },
+  { keys: [MOD, 'Shift', 'C'], what: 'Copy the last reply', mod: true, shift: true, key: 'c', run: () => copyLastReply() },
+  { keys: [MOD, ','], what: 'Settings', mod: true, key: ',', run: () => openSettings() },
+  { keys: [MOD, 'L'], what: 'Lock Pātaka', mod: true, key: 'l', run: () => lockNow() },
+  { keys: [MOD, '/'], what: 'These shortcuts', mod: true, key: '/', run: () => openShortcuts() },
+  { keys: ['Esc'], what: 'Stop the reply (in the message box)', key: null },
+  { keys: ['↑'], what: 'Edit your last message (in an empty message box)', key: null },
+];
+
+async function stepKorero(dir) {
+  if (!state.list.length) return;
+  const i = state.list.findIndex((k) => k.id === state.current?.id);
+  const next = state.list[Math.max(0, Math.min(state.list.length - 1, i < 0 ? 0 : i + dir))];
+  if (next) await openKorero(next.id);
+}
+
+function openShortcuts() {
+  $('shortcut-rows').replaceChildren(...SHORTCUTS.map((s) => el('tr', {},
+    el('td', {}, ...s.keys.flatMap((k, i) => (i ? [' ', el('kbd', { text: k })] : [el('kbd', { text: k })]))),
+    el('td', { text: s.what }))));
+  if (!$('shortcuts-dialog').open) $('shortcuts-dialog').showModal();
+}
+$('open-shortcuts').addEventListener('click', openShortcuts);
+
+window.addEventListener('keydown', (e) => {
+  if ($('app').classList.contains('hidden') || e.isComposing) return;
+  const mod = MAC ? e.metaKey : e.ctrlKey;
+  if (!mod || e.altKey) return;
+  // An open dialog (other than this list) keeps its keys to itself.
+  if ([...document.querySelectorAll('dialog[open]')].some((d) => d.id !== 'shortcuts-dialog')) return;
+  const key = e.key.toLowerCase();
+  const s = SHORTCUTS.find((x) => x.key && x.mod && x.key === key && !!x.shift === e.shiftKey);
+  if (!s) return;
+  e.preventDefault();
+  attempt(async () => s.run());
+});
 
 // ------------------------------------------------------------ auto-lock
 

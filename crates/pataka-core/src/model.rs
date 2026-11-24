@@ -191,6 +191,10 @@ pub struct Settings {
     pub last_model: Option<String>,
     /// The person has confirmed, once, what an agent's auto mode means.
     pub auto_acknowledged: bool,
+    /// Kōrero pinned to the top of the list, by id.
+    pub pinned: Vec<String>,
+    /// The first-run guide has been shown (or skipped).
+    pub guide_seen: bool,
 }
 
 impl Default for Settings {
@@ -206,6 +210,8 @@ impl Default for Settings {
             last_provider: None,
             last_model: None,
             auto_acknowledged: false,
+            pinned: Vec::new(),
+            guide_seen: false,
         }
     }
 }
@@ -273,7 +279,8 @@ pub enum AgentItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentInfo {
-    /// The project folder the agent works in.
+    /// The project folder the agent works in. Empty until one is chosen:
+    /// the agent then works in a private scratch folder of its own.
     pub workspace: String,
     /// Claude Code's session, so the agent can carry on after a restart.
     #[serde(default)]
@@ -283,8 +290,68 @@ pub struct AgentInfo {
     pub mode: String,
 }
 
+/// The `mode` of the kōrero `pataka service` keeps for every terminal
+/// Claude Code session. It holds their vault, so it is kept, but it is not a
+/// kōrero to chat in and the app does not list it.
+pub const SERVICE_AGENT_MODE: &str = "service";
+/// The `mode` of a kōrero `pataka claude` keeps for terminal sessions in one
+/// folder, found again by that folder.
+pub const TERMINAL_AGENT_MODE: &str = "terminal";
+
+impl AgentInfo {
+    /// Is this the `pataka service` kōrero?
+    pub fn is_service(&self) -> bool {
+        self.mode == SERVICE_AGENT_MODE
+    }
+
+    /// Does it hold the vault of Claude Code sessions run in a terminal
+    /// (`pataka service` or `pataka claude`), rather than an agent in the app?
+    pub fn is_terminal(&self) -> bool {
+        self.is_service() || self.mode == TERMINAL_AGENT_MODE
+    }
+
+    /// Has a project folder been chosen?
+    pub fn has_folder(&self) -> bool {
+        !self.workspace.trim().is_empty()
+    }
+}
+
 fn default_mode() -> String {
     "manual".into()
+}
+
+/// Files an agent kōrero changed, each with what was there before its first
+/// change, so the person can see the change and put the file back. Kept
+/// encrypted beside the kōrero.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AgentChanges {
+    pub files: Vec<FileChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChange {
+    /// The full path.
+    pub path: String,
+    /// Whether the file was there before the agent's first change.
+    pub existed: bool,
+    /// What it held then. `None` if it did not exist, or was too large or
+    /// not text, in which case it cannot be put back.
+    #[serde(default)]
+    pub original: Option<String>,
+    pub first_at: i64,
+    pub last_at: i64,
+    /// How many changes the agent was allowed to make to it.
+    #[serde(default)]
+    pub changes: u32,
+}
+
+impl FileChange {
+    /// Can the file be put back as it was?
+    pub fn revertible(&self) -> bool {
+        !self.existed || self.original.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -38,7 +38,7 @@ use crate::ctx;
 pub const DEFAULT_PORT: u16 = 47613;
 const LABEL: &str = "nz.pataka.proxy";
 const LOCKED: &str = "Pātaka is locked, so nothing was sent. Run `pataka unlock` in a terminal, then try again.";
-const SERVICE_MODE: &str = "service";
+use pataka_core::model::SERVICE_AGENT_MODE as SERVICE_MODE;
 const SERVICE_WORKSPACE: &str = "(every Claude Code session)";
 
 /// Variables written into the `env` of Claude Code's settings. Telemetry and

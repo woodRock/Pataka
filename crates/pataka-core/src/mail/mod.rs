@@ -240,6 +240,40 @@ impl Record {
     }
 }
 
+/// Reverse the mail change logged as entry `seq`, and log the undo.
+/// Returns what was done and the undo's own entry number.
+pub async fn undo_entry(vault: &MailVault, seq: u64) -> Result<(String, u64)> {
+    let path = vault.store.audit_path();
+    let (entries, entry) = crate::audit::undo_target(&path, seq)?;
+    let record: Record = entry
+        .mail
+        .clone()
+        .filter(|_| entry.event.starts_with("mail-"))
+        .and_then(|m| serde_json::from_value(m).ok())
+        .ok_or_else(|| Error::Invalid(format!("Entry {seq} is not a mail change.")))?;
+    if let Some(done) = entries
+        .iter()
+        .find(|e| e.mail.as_ref().is_some_and(|m| m["undoes"].as_u64() == Some(seq)))
+    {
+        return Err(Error::Invalid(format!(
+            "Entry {seq} was already undone (entry {}).",
+            done.seq
+        )));
+    }
+    let account = vault.account()?;
+    if entry.provider.as_deref().is_some_and(|p| p != account.host) {
+        return Err(Error::Invalid(
+            "That change was made on a different mail server than the one connected now.".into(),
+        ));
+    }
+    let mut m = ops::Mailer::connect(&account).await?;
+    let r = m.undo(vault, &record, seq).await;
+    m.close().await;
+    let (out, text) = r?;
+    let n = audit_record(&path, entry.korero.as_deref(), &account.host, &out)?;
+    Ok((text, n))
+}
+
 /// Write a mutation to the audit log. Returns the entry's number.
 pub fn audit_record(audit_path: &std::path::Path, korero: Option<&str>, host: &str, record: &Record) -> Result<u64> {
     let n = record.ids.len();

@@ -238,6 +238,121 @@ pub struct Record {
 }
 
 /// Write a change to the audit log. Returns the entry's number.
+/// Sign in to Google with the person's own OAuth client (`client_file`, the
+/// JSON Google Cloud Console downloads): listen on a loopback port, hand the
+/// sign-in address to `open` (which shows it or opens a browser), and wait
+/// for Google to send the person back. Returns the account to store.
+pub async fn sign_in(client_file: &str, login_hint: Option<&str>, open: impl FnOnce(&str)) -> Result<Account> {
+    let (client_id, client_code) = oauth::read_client_file(client_file)?;
+    let listener = oauth::listen().await?;
+    let port = listener.local_addr().map_err(|e| Error::Io(e.to_string()))?.port();
+    let sign_in = oauth::SignIn::new(port);
+    open(&sign_in.url(&google_auth(), &client_id, login_hint));
+    let code = oauth::wait_for_code(&listener, &sign_in, oauth::SIGN_IN_WAIT).await?;
+    let tokens = oauth::exchange(&google_token(), &client_id, &client_code, &code, &sign_in).await?;
+    if !tokens.scope.contains("calendar.events") {
+        return Err(Error::Invalid(
+            "Google did not give access to your events (the box was left unticked). Connect again and tick it.".into(),
+        ));
+    }
+    let c = google::Cal::with_access(&google_api(), tokens.access.clone())?;
+    let primary = c.calendar("primary").await?;
+    let email = primary["id"].as_str().unwrap_or_default().to_string();
+    let grant = tokens.grant.ok_or_else(|| {
+        Error::Invalid(
+            "Google gave no lasting access. Remove Pātaka's access in your Google Account (Security, Third-party connections) and connect again.".into(),
+        )
+    })?;
+    Ok(Account {
+        email,
+        client_id,
+        client_code,
+        grant,
+        api: google_api(),
+        token_url: google_token(),
+    })
+}
+
+/// Keep a signed-in account, and log it.
+pub fn save_connected(vault: &CalendarVault, account: Account) -> Result<()> {
+    let host = account.host();
+    vault.set_account(Some(account))?;
+    google::forget_access();
+    crate::audit::append(
+        &vault.store.audit_path(),
+        crate::audit::Entry {
+            event: "calendar-connected".into(),
+            provider: Some(host),
+            detail: Some("Google Calendar".into()),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Forget the account, after asking Google to revoke its access. `None` if
+/// no calendar was connected; otherwise whether Google revoked it.
+pub async fn disconnect(vault: &CalendarVault) -> Result<Option<bool>> {
+    let Some(account) = vault.load()?.account else {
+        return Ok(None);
+    };
+    let revoked = oauth::revoke(&google_revoke(), account.grant.as_str()).await;
+    vault.set_account(None)?;
+    google::forget_access();
+    crate::audit::append(
+        &vault.store.audit_path(),
+        crate::audit::Entry {
+            event: "calendar-disconnected".into(),
+            provider: Some(account.host()),
+            detail: Some(
+                if revoked {
+                    "revoked at Google"
+                } else {
+                    "not revoked at Google"
+                }
+                .into(),
+            ),
+            ..Default::default()
+        },
+    )?;
+    Ok(Some(revoked))
+}
+
+/// Reverse the calendar change logged as entry `seq`, and log the undo.
+/// Returns what was done and the undo's own entry number.
+pub async fn undo_entry(vault: &CalendarVault, seq: u64) -> Result<(String, u64)> {
+    let path = vault.store.audit_path();
+    let (entries, entry) = crate::audit::undo_target(&path, seq)?;
+    let record: Record = entry
+        .calendar
+        .clone()
+        .filter(|_| entry.event.starts_with("calendar-"))
+        .and_then(|m| serde_json::from_value(m).ok())
+        .ok_or_else(|| Error::Invalid(format!("Entry {seq} is not a calendar change.")))?;
+    if record.action == "undo" {
+        return Err(Error::Invalid(format!("Entry {seq} is itself an undo.")));
+    }
+    if let Some(done) = entries
+        .iter()
+        .find(|e| e.calendar.as_ref().is_some_and(|m| m["undoes"].as_u64() == Some(seq)))
+    {
+        return Err(Error::Invalid(format!(
+            "Entry {seq} was already undone (entry {}).",
+            done.seq
+        )));
+    }
+    let account = vault.account()?;
+    if entry.provider.as_deref().is_some_and(|p| p != account.host()) {
+        return Err(Error::Invalid(
+            "That change was made on a different calendar service than the one connected now.".into(),
+        ));
+    }
+    let c = google::Cal::connect(&account).await?;
+    let (out, text) = mcp::undo(&c, vault, &record, seq).await?;
+    let n = audit_record(&path, entry.korero.as_deref(), &account.host(), &out)?;
+    Ok((text, n))
+}
+
 pub fn audit_record(audit_path: &std::path::Path, korero: Option<&str>, host: &str, record: &Record) -> Result<u64> {
     let e = crate::audit::append(
         audit_path,

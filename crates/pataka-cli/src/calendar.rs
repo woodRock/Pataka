@@ -8,9 +8,7 @@
 
 use std::path::PathBuf;
 
-use pataka_core::audit;
-use pataka_core::calendar::google::{self, Cal};
-use pataka_core::calendar::{self, oauth, Account, CalendarVault, Record};
+use pataka_core::calendar::{self, CalendarVault};
 use pataka_core::error::{Error, Result};
 
 use crate::ctx::{self, Ctx};
@@ -76,15 +74,9 @@ pub fn connect(client: Option<PathBuf>, email: Option<String>, no_browser: bool)
     };
     let text = std::fs::read_to_string(&client)
         .map_err(|_| Error::Invalid(format!("Could not read {}.", client.display())))?;
-    let (client_id, client_code) = oauth::read_client_file(&text)?;
-
-    let rt = runtime()?;
-    let (tokens, email) = rt.block_on(async {
-        let listener = oauth::listen().await?;
-        let port = listener.local_addr().map_err(|e| Error::Io(e.to_string()))?.port();
-        let sign_in = oauth::SignIn::new(port);
-        let url = sign_in.url(&calendar::google_auth(), &client_id, email.as_deref());
-        if no_browser || !open_browser(&url) {
+    let v = vault(&ctx);
+    let account = runtime()?.block_on(calendar::sign_in(&text, email.as_deref(), |url| {
+        if no_browser || !open_browser(url) {
             println!("Open this address in a browser on this computer and sign in:");
             println!();
             println!("  {url}");
@@ -94,44 +86,9 @@ pub fn connect(client: Option<PathBuf>, email: Option<String>, no_browser: bool)
             println!("(Google warns that it has not verified the app: it is your own client. Choose Continue.)");
         }
         println!("Waiting for Google …");
-        let code = oauth::wait_for_code(&listener, &sign_in, oauth::SIGN_IN_WAIT).await?;
-        let tokens = oauth::exchange(&calendar::google_token(), &client_id, &client_code, &code, &sign_in).await?;
-        if !tokens.scope.contains("calendar.events") {
-            return Err(Error::Invalid(
-                "Google did not give access to your events (the box was left unticked). Run it again and tick it."
-                    .into(),
-            ));
-        }
-        let c = Cal::with_access(&calendar::google_api(), tokens.access.clone())?;
-        let primary = c.calendar("primary").await?;
-        let email = primary["id"].as_str().unwrap_or_default().to_string();
-        Ok::<_, Error>((tokens, email))
-    })?;
-    let grant = tokens.grant.ok_or_else(|| {
-        Error::Invalid(
-            "Google gave no lasting access. Remove Pātaka's access at myaccount.google.com (Security, Third-party connections) and run this again.".into(),
-        )
-    })?;
-    let account = Account {
-        email: email.clone(),
-        client_id,
-        client_code,
-        grant,
-        api: calendar::google_api(),
-        token_url: calendar::google_token(),
-    };
-    let host = account.host();
-    vault(&ctx).set_account(Some(account))?;
-    google::forget_access();
-    audit::append(
-        &ctx.store.audit_path(),
-        audit::Entry {
-            event: "calendar-connected".into(),
-            provider: Some(host),
-            detail: Some("Google Calendar".into()),
-            ..Default::default()
-        },
-    )?;
+    }))?;
+    let email = account.email.clone();
+    calendar::save_connected(&v, account)?;
     println!(
         "Connected to Google Calendar ({email}). `pataka claude` now offers Claude Code the pataka-calendar tools."
     );
@@ -151,33 +108,13 @@ pub fn connect(client: Option<PathBuf>, email: Option<String>, no_browser: bool)
 
 pub fn disconnect() -> Result<i32> {
     let ctx = Ctx::open()?;
-    let v = vault(&ctx);
-    let Some(account) = v.load()?.account else {
+    let Some(revoked) = runtime()?.block_on(calendar::disconnect(&vault(&ctx)))? else {
         println!("No calendar is connected.");
         return Ok(0);
     };
-    let revoked = runtime()?.block_on(oauth::revoke(&calendar::google_revoke(), account.grant.as_str()));
-    v.set_account(None)?;
-    google::forget_access();
     if pataka_core::claude_hooks::calendar_registered() {
         let _ = crate::service::server_register(Server::Calendar, false, false, true);
     }
-    audit::append(
-        &ctx.store.audit_path(),
-        audit::Entry {
-            event: "calendar-disconnected".into(),
-            provider: Some(account.host()),
-            detail: Some(
-                if revoked {
-                    "revoked at Google"
-                } else {
-                    "not revoked at Google"
-                }
-                .into(),
-            ),
-            ..Default::default()
-        },
-    )?;
     if revoked {
         println!("Disconnected. Google has revoked Pātaka's access, and Pātaka no longer stores it.");
     } else {
@@ -213,53 +150,7 @@ pub fn connected(ctx: &Ctx) -> bool {
 
 pub fn undo(seq: u64) -> Result<i32> {
     let ctx = Ctx::open()?;
-    let path = ctx.store.audit_path();
-    if !audit::verify(&path).ok {
-        return Err(Error::Invalid(
-            "The audit log failed its hash-chain check, so Pātaka will not act on it. See `pataka audit verify`."
-                .into(),
-        ));
-    }
-    let entries = audit::all(&path)?;
-    if entries.iter().filter(|e| e.seq == seq).count() > 1 {
-        return Err(Error::Invalid(format!(
-            "Two audit entries are numbered {seq} (written at the same moment), so Pātaka will not guess which you mean."
-        )));
-    }
-    let entry = entries
-        .iter()
-        .find(|e| e.seq == seq)
-        .ok_or_else(|| Error::NotFound(format!("audit entry {seq}")))?;
-    let record: Record = entry
-        .calendar
-        .clone()
-        .filter(|_| entry.event.starts_with("calendar-"))
-        .and_then(|m| serde_json::from_value(m).ok())
-        .ok_or_else(|| Error::Invalid(format!("Entry {seq} is not a Pātaka Calendar change.")))?;
-    if record.action == "undo" {
-        return Err(Error::Invalid(format!("Entry {seq} is itself an undo.")));
-    }
-    if let Some(done) = entries
-        .iter()
-        .find(|e| e.calendar.as_ref().is_some_and(|m| m["undoes"].as_u64() == Some(seq)))
-    {
-        return Err(Error::Invalid(format!(
-            "Entry {seq} was already undone (entry {}).",
-            done.seq
-        )));
-    }
-    let v = vault(&ctx);
-    let account = v.account()?;
-    if entry.provider.as_deref().is_some_and(|p| p != account.host()) {
-        return Err(Error::Invalid(
-            "That change was made on a different calendar service than the one connected now.".into(),
-        ));
-    }
-    let (out, text) = runtime()?.block_on(async {
-        let c = Cal::connect(&account).await?;
-        calendar::mcp::undo(&c, &v, &record, seq).await
-    })?;
-    let n = calendar::audit_record(&path, entry.korero.as_deref(), &account.host(), &out)?;
+    let (text, n) = runtime()?.block_on(calendar::undo_entry(&vault(&ctx), seq))?;
     println!("{text} (Logged as entry {n}.)");
     Ok(0)
 }

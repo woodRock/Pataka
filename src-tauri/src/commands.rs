@@ -58,6 +58,7 @@ pub struct SettingsView {
     key_mode: Option<KeyMode>,
     data_dir: String,
     detector: &'static str,
+    guide_seen: bool,
 }
 
 #[derive(Serialize)]
@@ -68,6 +69,106 @@ pub struct ConversationSummary {
     classification: Classification,
     updated_at: i64,
     message_count: usize,
+    pinned: bool,
+    agent: bool,
+    /// For a search: the text around the first match in a message.
+    snippet: Option<String>,
+}
+
+impl ConversationSummary {
+    fn of(c: &Conversation, pinned: &[String], snippet: Option<String>) -> Self {
+        ConversationSummary {
+            id: c.id.clone(),
+            title: c.title.clone(),
+            classification: c.classification,
+            updated_at: c.updated_at,
+            message_count: c.messages.len(),
+            pinned: pinned.contains(&c.id),
+            agent: c.agent.is_some(),
+            snippet,
+        }
+    }
+}
+
+/// Kōrero the app lists: all but `pataka service`'s, which holds the vault
+/// for terminal Claude Code sessions and is kept, but is not a place to chat.
+fn listed(state: &AppState, key: &crate::crypto::DataKey) -> Result<Vec<Conversation>> {
+    let mut out = Vec::new();
+    for id in state.store.conversation_ids()? {
+        if let Ok(c) = state.store.load_conversation(key, &id) {
+            if !c.agent.as_ref().is_some_and(|a| a.is_service()) {
+                out.push(c);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Pinned first, then the most recently changed.
+fn sort_summaries(out: &mut [ConversationSummary]) {
+    out.sort_by_key(|c| (!c.pinned, std::cmp::Reverse(c.updated_at)));
+}
+
+/// Where `query` first appears in a message of `c`, with some text either
+/// side; the title counts as a match with no snippet. Matching ignores case
+/// and macrons.
+fn search_match(c: &Conversation, query: &str) -> Option<Option<String>> {
+    let q = fold(query);
+    if fold(&c.title).contains(&q) {
+        return Some(None);
+    }
+    for m in &c.messages {
+        let text = match m.role {
+            // What the person typed, and replies with placeholders filled in.
+            Role::User => m.text.clone(),
+            Role::Assistant => {
+                let mut t = redaction::restore(&m.text, &c.vault);
+                for it in &m.items {
+                    if let AgentItem::Text { text } = it {
+                        t.push(' ');
+                        t.push_str(&redaction::restore(text, &c.vault));
+                    }
+                }
+                t
+            }
+        };
+        let chars: Vec<char> = text.chars().collect();
+        let folded: Vec<char> = chars.iter().map(|ch| fold_char(*ch)).collect();
+        let qc: Vec<char> = q.chars().collect();
+        if qc.is_empty() || folded.len() < qc.len() {
+            continue;
+        }
+        if let Some(i) = (0..=folded.len() - qc.len()).find(|&i| folded[i..i + qc.len()] == qc[..]) {
+            let start = i.saturating_sub(40);
+            let end = (i + qc.len() + 60).min(chars.len());
+            let mut snip: String = chars[start..end].iter().collect();
+            snip = snip.split_whitespace().collect::<Vec<_>>().join(" ");
+            if start > 0 {
+                snip.insert(0, '…');
+            }
+            if end < chars.len() {
+                snip.push('…');
+            }
+            return Some(Some(snip));
+        }
+    }
+    None
+}
+
+fn fold_char(c: char) -> char {
+    let c = match c {
+        'ā' | 'Ā' => 'a',
+        'ē' | 'Ē' => 'e',
+        'ī' | 'Ī' => 'i',
+        'ō' | 'Ō' => 'o',
+        'ū' | 'Ū' => 'u',
+        _ => c,
+    };
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+fn fold(s: &str) -> String {
+    s.trim().chars().map(fold_char).collect()
 }
 
 #[derive(Serialize)]
@@ -651,6 +752,7 @@ fn settings_view(state: &AppState, s: &Settings) -> SettingsView {
         key_mode: state.store.key_mode().ok().flatten(),
         data_dir: state.store.root().display().to_string(),
         detector: DETECTOR,
+        guide_seen: s.guide_seen,
     }
 }
 
@@ -915,20 +1017,49 @@ pub async fn cli_status(kind: ProviderKind, command: Option<String>) -> Result<p
 #[tauri::command]
 pub fn list_conversations(state: State<'_, AppState>) -> Result<Vec<ConversationSummary>> {
     state.with_session(|s| {
-        let mut out = Vec::new();
-        for id in state.store.conversation_ids()? {
-            if let Ok(c) = state.store.load_conversation(&s.key, &id) {
-                out.push(ConversationSummary {
-                    id: c.id,
-                    title: c.title,
-                    classification: c.classification,
-                    updated_at: c.updated_at,
-                    message_count: c.messages.len(),
-                });
-            }
-        }
-        out.sort_by_key(|c| std::cmp::Reverse(c.updated_at));
+        let mut out: Vec<_> = listed(&state, &s.key)?
+            .iter()
+            .map(|c| ConversationSummary::of(c, &s.settings.pinned, None))
+            .collect();
+        sort_summaries(&mut out);
         Ok(out)
+    })
+}
+
+/// Kōrero whose title or messages contain `query`. It all happens here, on
+/// the decrypted kōrero; nothing is sent anywhere.
+#[tauri::command]
+pub fn search_conversations(state: State<'_, AppState>, query: String) -> Result<Vec<ConversationSummary>> {
+    if query.trim().is_empty() || query.len() > 200 {
+        return Ok(Vec::new());
+    }
+    state.with_session(|s| {
+        let mut out: Vec<_> = listed(&state, &s.key)?
+            .iter()
+            .filter_map(|c| search_match(c, &query).map(|snip| ConversationSummary::of(c, &s.settings.pinned, snip)))
+            .collect();
+        sort_summaries(&mut out);
+        Ok(out)
+    })
+}
+
+#[tauri::command]
+pub fn set_pinned(state: State<'_, AppState>, id: String, pinned: bool) -> Result<()> {
+    state.with_session(|s| {
+        s.settings.pinned.retain(|p| p != &id);
+        if pinned {
+            state.store.load_conversation(&s.key, &id)?;
+            s.settings.pinned.push(id);
+        }
+        state.store.save_settings(&s.key, &s.settings)
+    })
+}
+
+#[tauri::command]
+pub fn set_guide_seen(state: State<'_, AppState>) -> Result<()> {
+    state.with_session(|s| {
+        s.settings.guide_seen = true;
+        state.store.save_settings(&s.key, &s.settings)
     })
 }
 
@@ -1023,9 +1154,34 @@ pub fn delete_conversation(state: State<'_, AppState>, id: String) -> Result<()>
 }
 
 /// Snapshot what detection needs, so the model can run without holding the lock.
-fn snapshot(state: &AppState, id: &str, provider_id: &str) -> Result<(Conversation, Settings, Provider)> {
+/// Take back the person's message `from` and everything after it, so a
+/// message can be edited and sent again, or a reply retried. Chat kōrero
+/// only: an agent's Claude Code session keeps its own history.
+fn rewind(c: &mut Conversation, from: Option<&str>) -> Result<()> {
+    let Some(from) = from else { return Ok(()) };
+    if c.agent.is_some() {
+        return Err(Error::Invalid(
+            "An agent remembers its own history, so its messages cannot be edited or retried. Send a new message instead.".into(),
+        ));
+    }
+    let i = c
+        .messages
+        .iter()
+        .position(|m| m.id == from && m.role == Role::User)
+        .ok_or_else(|| Error::Invalid("That message is no longer in this kōrero.".into()))?;
+    c.messages.truncate(i);
+    Ok(())
+}
+
+fn snapshot(
+    state: &AppState,
+    id: &str,
+    provider_id: &str,
+    replace_from: Option<&str>,
+) -> Result<(Conversation, Settings, Provider)> {
     state.with_session(|s| {
-        let c = state.store.load_conversation(&s.key, id)?;
+        let mut c = state.store.load_conversation(&s.key, id)?;
+        rewind(&mut c, replace_from)?;
         let p = find_provider(&s.settings, provider_id)?.clone();
         Ok((c, s.settings.clone(), p))
     })
@@ -1039,9 +1195,10 @@ pub async fn preview_message(
     text: String,
     provider_id: String,
     model: String,
+    replace_from: Option<String>,
 ) -> Result<Preview> {
     check_text(&text)?;
-    let (c, settings, p) = snapshot(&state, &id, &provider_id)?;
+    let (c, settings, p) = snapshot(&state, &id, &provider_id, replace_from.as_deref())?;
     let spans = model_spans_for(&app, &c, &text, &settings, sovereignty::effective_trust(&p)).await?;
     Ok(prepare(&c, &text, &settings, &p, &model, &spans)?.0)
 }
@@ -1055,6 +1212,7 @@ pub fn cancel_reply(state: State<'_, AppState>, id: String) -> Result<()> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn send_message(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1063,6 +1221,7 @@ pub async fn send_message(
     provider_id: String,
     model: String,
     reviewed: bool,
+    replace_from: Option<String>,
 ) -> Result<ConversationView> {
     check_text(&text)?;
     let model = model.trim().to_string();
@@ -1075,7 +1234,7 @@ pub async fn send_message(
         ));
     }
 
-    let (c0, settings0, p0) = snapshot(&state, &id, &provider_id)?;
+    let (c0, settings0, p0) = snapshot(&state, &id, &provider_id, replace_from.as_deref())?;
     let spans = model_spans_for(&app, &c0, &text, &settings0, sovereignty::effective_trust(&p0)).await?;
     drop((c0, settings0, p0));
     if state.streams().contains_key(&id) {
@@ -1086,6 +1245,7 @@ pub async fn send_message(
 
     let (conv, provider, key, system, built, assistant_id) = state.with_session(|s| {
         let mut c = state.store.load_conversation(&s.key, &id)?;
+        rewind(&mut c, replace_from.as_deref())?;
         let p = find_provider(&s.settings, &provider_id)?.clone();
         let (preview, built) = prepare(&c, &text, &s.settings, &p, &model, &spans)?;
         let (cats, acts) = counts(&preview.findings);
@@ -1119,7 +1279,8 @@ pub async fn send_message(
         audit::append(&state.store.audit_path(), entry)?;
 
         let t = now();
-        if c.messages.is_empty() {
+        // A first message names the kōrero; editing it later keeps the name.
+        if c.messages.is_empty() && replace_from.is_none() {
             let title: String = text
                 .split_whitespace()
                 .collect::<Vec<_>>()
@@ -1440,9 +1601,76 @@ pub fn model_remove(state: State<'_, AppState>) -> Result<ModelStatus> {
 
 // ---------------------------------------------------------------- audit
 
+/// Read the text of a file the person attached: its bytes, base64-encoded,
+/// from the window (which has no file system access of its own). Nothing is
+/// sent anywhere; the text goes into the message and is redacted with it.
 #[tauri::command]
-pub fn audit_entries(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<audit::Entry>> {
-    state.with_session(|_| audit::recent(&state.store.audit_path(), limit.unwrap_or(200).min(5000)))
+pub async fn extract_attachment(
+    state: State<'_, AppState>,
+    name: String,
+    data: String,
+) -> Result<crate::extract::Extracted> {
+    use base64::Engine;
+    state.with_session(|_| Ok(()))?;
+    if data.len() > crate::extract::MAX_BYTES / 3 * 4 + 8 {
+        return Err(Error::Invalid(format!(
+            "{name} is too large; Pātaka reads attachments up to {} MB.",
+            crate::extract::MAX_BYTES / (1024 * 1024)
+        )));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|_| Error::Invalid("The file could not be read.".into()))?;
+    tauri::async_runtime::spawn_blocking(move || crate::extract::extract(&name, &bytes))
+        .await
+        .map_err(|_| Error::Invalid("The file could not be read.".into()))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditRow {
+    #[serde(flatten)]
+    entry: audit::Entry,
+    /// "mail" or "calendar" when the change can still be undone.
+    undo: Option<&'static str>,
+}
+
+#[tauri::command]
+pub fn audit_entries(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<AuditRow>> {
+    state.with_session(|_| {
+        let all = audit::all(&state.store.audit_path())?;
+        let kinds = audit::undoable_all(&all);
+        let skip = all.len().saturating_sub(limit.unwrap_or(200).min(5000));
+        Ok(all
+            .into_iter()
+            .zip(kinds)
+            .skip(skip)
+            .rev()
+            .map(|(entry, undo)| AuditRow { entry, undo })
+            .collect())
+    })
+}
+
+/// Undo the mail or calendar change logged as entry `seq`, as
+/// `pataka mail undo` / `pataka calendar undo` do. Says what was done.
+#[tauri::command]
+pub async fn audit_undo(state: State<'_, AppState>, seq: u64) -> Result<String> {
+    let (key, kind) = state.with_session(|s| {
+        let (all, e) = audit::undo_target(&state.store.audit_path(), seq)?;
+        let kind = audit::undoable(&all, &e).ok_or_else(|| {
+            Error::Invalid(format!(
+                "Entry {seq} cannot be undone (it is not a change, or it was undone already)."
+            ))
+        })?;
+        Ok((s.key.clone(), kind))
+    })?;
+    let store = state.store.clone();
+    let (text, n) = if kind == "mail" {
+        crate::mail::undo_entry(&crate::mail::MailVault { store, key }, seq).await?
+    } else {
+        crate::calendar::undo_entry(&crate::calendar::CalendarVault { store, key }, seq).await?
+    };
+    Ok(format!("{text} (Logged as entry {n}.)"))
 }
 
 #[tauri::command]
@@ -1484,6 +1712,52 @@ mod tests {
             error: None,
             items: Vec::new(),
         }
+    }
+
+    #[test]
+    fn rewinding_takes_back_a_message_and_what_follows() {
+        let mut c = conv(vec![
+            msg(Role::User, "one", None),
+            msg(Role::Assistant, "reply one", None),
+            msg(Role::User, "two", None),
+            msg(Role::Assistant, "reply two", None),
+        ]);
+        let (first_reply, second) = (c.messages[1].id.clone(), c.messages[2].id.clone());
+        rewind(&mut c, None).unwrap();
+        assert_eq!(c.messages.len(), 4);
+        // Only the person's own messages can be edited.
+        assert!(rewind(&mut c, Some(&first_reply)).is_err());
+        rewind(&mut c, Some(&second)).unwrap();
+        assert_eq!(
+            c.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+            ["one", "reply one"]
+        );
+        assert!(rewind(&mut c, Some("gone")).is_err());
+        c.agent = Some(AgentInfo {
+            workspace: String::new(),
+            session_id: None,
+            mode: "manual".into(),
+        });
+        let first = c.messages[0].id.clone();
+        assert!(rewind(&mut c, Some(&first)).is_err(), "agents keep their own history");
+    }
+
+    #[test]
+    fn search_finds_titles_and_text_ignoring_case_and_macrons() {
+        // A placeholder token, built here so nothing on this computer fills it in.
+        let ph = format!("[{}_{}]", "PLACE", 7);
+        let mut c = conv(vec![
+            msg(Role::User, "Can we plan the pōwhiri for Saturday morning", None),
+            msg(Role::Assistant, &format!("Of course, at {ph} then."), None),
+        ]);
+        c.title = "Garden planning".into();
+        c.vault.placeholders.insert(ph.clone(), "the old wharenui".into());
+        assert_eq!(search_match(&c, "GARDEN"), Some(None));
+        let snip = search_match(&c, "powhiri").unwrap().unwrap();
+        assert!(snip.contains("pōwhiri for Saturday"), "{snip}");
+        // Replies are searched with real values filled in.
+        assert!(search_match(&c, "wharenui").unwrap().unwrap().contains("old wharenui"));
+        assert_eq!(search_match(&c, "tangihanga"), None);
     }
 
     #[test]
