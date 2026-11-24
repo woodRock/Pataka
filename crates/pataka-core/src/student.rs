@@ -190,8 +190,6 @@ const STRIDE: usize = 128;
 const THRESHOLD: f32 = 0.5;
 /// Texts remembered per generation of the span cache (two are kept).
 const CACHE_LIMIT: usize = 8192;
-/// Windows of one text run through the model together.
-const BATCH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ModelSpan {
@@ -223,10 +221,6 @@ pub struct Student {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
     tags: Vec<String>,
-    /// The token that fills out a short window in a batch.
-    pad: i64,
-    /// Cleared if the model refuses a batch: windows then run one at a time.
-    batches: std::sync::atomic::AtomicBool,
     cache: Mutex<SpanCache>,
 }
 
@@ -291,16 +285,10 @@ impl Student {
             .map_err(|e| Error::Invalid(e.to_string()))?;
         tokenizer.with_padding(None);
         let config = std::fs::read_to_string(dir.join("config.json"))?;
-        let pad = ["[PAD]", "<pad>"]
-            .into_iter()
-            .find_map(|t| tokenizer.token_to_id(t))
-            .unwrap_or(0) as i64;
         Ok(Student {
             session: Mutex::new(session),
             tokenizer,
             tags: tags_from_config(&config)?,
-            pad,
-            batches: std::sync::atomic::AtomicBool::new(true),
             cache: Mutex::new(SpanCache::default()),
         })
     }
@@ -311,7 +299,7 @@ impl Student {
         if let Some(hit) = self.cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
             return Ok(hit);
         }
-        let spans = self.run_model(text, self.batches.load(std::sync::atomic::Ordering::Relaxed))?;
+        let spans = self.run_model(text)?;
         self.cache
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -319,65 +307,38 @@ impl Student {
         Ok(spans)
     }
 
-    /// Run the model over every window of `text`: up to `BATCH` windows at a
-    /// time when `batched`, the shorter ones filled out with padding the
-    /// attention mask hides, or one at a time. A model that refuses a batch
-    /// is asked one window at a time from then on.
-    fn run_model(&self, text: &str, batched: bool) -> Result<Vec<ModelSpan>> {
+    /// Run the model over every window of `text`, one at a time. (Batching
+    /// windows was tried: on a laptop CPU it ran two to four times slower.)
+    fn run_model(&self, text: &str) -> Result<Vec<ModelSpan>> {
         let enc = self
             .tokenizer
             .encode(text, true)
             .map_err(|e| Error::Invalid(format!("tokeniser: {e}")))?;
         let utf16 = utf16_offsets(text);
         let units: Vec<u16> = text.encode_utf16().collect();
-        let windows: Vec<&tokenizers::Encoding> = std::iter::once(&enc).chain(enc.get_overflowing()).collect();
-        let tags = self.tags.len();
         let mut found = Vec::new();
-        let mut refused = false;
         let mut session = self.session.lock().unwrap_or_else(|p| p.into_inner());
-        for group in windows.chunks(if batched { BATCH } else { 1 }) {
-            let n = group.iter().map(|e| e.get_ids().len()).max().unwrap_or(0);
-            let b = group.len();
-            let mut ids = Vec::with_capacity(b * n);
-            let mut mask = Vec::with_capacity(b * n);
-            for e in group {
-                let len = e.get_ids().len();
-                ids.extend(e.get_ids().iter().map(|&i| i as i64));
-                ids.extend(std::iter::repeat_n(self.pad, n - len));
-                mask.extend(std::iter::repeat_n(1i64, len));
-                mask.extend(std::iter::repeat_n(0i64, n - len));
-            }
-            let input_ids = Tensor::from_array(([b, n], ids)).map_err(|e| Error::Invalid(e.to_string()))?;
-            let mask = Tensor::from_array(([b, n], mask)).map_err(|e| Error::Invalid(e.to_string()))?;
-            let outputs = match session.run(ort::inputs!["input_ids" => input_ids, "attention_mask" => mask]) {
-                Ok(o) => o,
-                Err(_) if b > 1 => {
-                    refused = true;
-                    break;
-                }
-                Err(e) => return Err(Error::Invalid(format!("The name model failed: {e}"))),
-            };
+        for e in std::iter::once(&enc).chain(enc.get_overflowing()) {
+            let ids: Vec<i64> = e.get_ids().iter().map(|&i| i as i64).collect();
+            let offsets: Vec<(usize, usize)> = e
+                .get_offsets()
+                .iter()
+                .zip(e.get_special_tokens_mask())
+                .map(|(&(a, b), &special)| if special == 1 { (0, 0) } else { (utf16[a], utf16[b]) })
+                .collect();
+            let n = ids.len();
+            let input_ids = Tensor::from_array(([1usize, n], ids)).map_err(|e| Error::Invalid(e.to_string()))?;
+            let mask = Tensor::from_array(([1usize, n], vec![1i64; n])).map_err(|e| Error::Invalid(e.to_string()))?;
+            let outputs = session
+                .run(ort::inputs!["input_ids" => input_ids, "attention_mask" => mask])
+                .map_err(|e| Error::Invalid(format!("The name model failed: {e}")))?;
             let (_, logits) = outputs[0]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| Error::Invalid(format!("model output: {e}")))?;
-            if logits.len() != b * n * tags {
+            if logits.len() != n * self.tags.len() {
                 return Err(Error::Invalid("The name model returned an unexpected shape.".into()));
             }
-            for (i, e) in group.iter().enumerate() {
-                let offsets: Vec<(usize, usize)> = e
-                    .get_offsets()
-                    .iter()
-                    .zip(e.get_special_tokens_mask())
-                    .map(|(&(a, b), &special)| if special == 1 { (0, 0) } else { (utf16[a], utf16[b]) })
-                    .collect();
-                let rows = &logits[i * n * tags..(i * n + offsets.len()) * tags];
-                found.extend(decode(&units, &offsets, rows, &self.tags, THRESHOLD));
-            }
-        }
-        drop(session);
-        if refused {
-            self.batches.store(false, std::sync::atomic::Ordering::Relaxed);
-            return self.run_model(text, false);
+            found.extend(decode(&units, &offsets, logits, &self.tags, THRESHOLD));
         }
         Ok(union(found))
     }
@@ -668,27 +629,6 @@ mod tests {
 
     /// Runs the real model when it is installed: set PATAKA_MODEL_ROOT to a
     /// directory laid out like the app data directory.
-    #[test]
-    #[ignore]
-    fn real_model_batches_give_the_same_spans() {
-        let root = PathBuf::from(std::env::var("PATAKA_MODEL_ROOT").expect("PATAKA_MODEL_ROOT"));
-        let s = Student::load(&root).unwrap();
-        let para = "Kia ora Aroha, it was good to see Mere Ngata and Tama at the hui in Rotorua. \
-                    Please send the notes to Wiremu Parata before Friday. ";
-        let text = para.repeat(120);
-        let one = s.run_model(&text, false).unwrap();
-        let batched = s.run_model(&text, true).unwrap();
-        assert!(!one.is_empty());
-        assert_eq!(
-            one.iter().map(|m| (m.start, m.end, &m.label)).collect::<Vec<_>>(),
-            batched.iter().map(|m| (m.start, m.end, &m.label)).collect::<Vec<_>>()
-        );
-        assert!(
-            s.batches.load(std::sync::atomic::Ordering::Relaxed),
-            "the model took a batch"
-        );
-    }
-
     #[test]
     #[ignore]
     fn real_model_finds_names() {
