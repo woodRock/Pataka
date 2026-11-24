@@ -40,7 +40,7 @@ fn vault(state: &AppState) -> Result<MailVault> {
 }
 
 /// The `pataka` command: the copy bundled with the app, or the installed one.
-fn pataka_command() -> Option<std::path::PathBuf> {
+pub(crate) fn pataka_command() -> Option<std::path::PathBuf> {
     crate::terminal::bundled().or_else(|| crate::terminal::installed_path().filter(|p| p.exists()))
 }
 
@@ -167,10 +167,11 @@ pub async fn mail_register(state: State<'_, AppState>, on: bool) -> Result<MailS
     status_view(&state)
 }
 
-async fn run_pataka(args: &[&str]) -> Result<()> {
+pub(crate) async fn run_pataka(args: &[&str]) -> Result<()> {
     let exe = pataka_command().ok_or_else(|| {
         Error::Invalid("The pataka command is not available. Install it in Settings → Claude Code first.".into())
     })?;
+    let what = args.first().copied().unwrap_or_default().to_string();
     let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
     let out = tauri::async_runtime::spawn_blocking(move || std::process::Command::new(exe).args(&args).output())
         .await
@@ -180,7 +181,7 @@ async fn run_pataka(args: &[&str]) -> Result<()> {
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
         let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("it failed");
-        Err(Error::Invalid(format!("pataka mail: {}", line.trim())))
+        Err(Error::Invalid(format!("pataka {what}: {}", line.trim())))
     }
 }
 

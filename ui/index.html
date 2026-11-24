@@ -48,8 +48,10 @@
         <button id="new-tapu" class="tapu-btn" title="Restricted kōrero: only on-device or sovereign models">+ Tapu</button>
       </div>
       <button id="new-agent" class="agent-btn" title="An agent that reads, edits and runs commands in a project folder, with every request redacted by Tūmataiti">+ Agent in a folder</button>
+      <input id="korero-search" class="korero-search" type="search" placeholder="Search kōrero" aria-label="Search kōrero" autocomplete="off" spellcheck="false">
       <nav id="korero-list" class="korero-list" aria-label="Kōrero"></nav>
       <div class="sidebar-foot">
+        <button id="open-shortcuts" class="icon" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">⌨</button>
         <button id="open-settings">Settings</button>
         <button id="lock-now">Lock</button>
       </div>
@@ -68,6 +70,7 @@
             <summary aria-label="More">⋯</summary>
             <div class="menu-body">
               <button id="korero-terms">Kōrero terms…</button>
+              <button id="pin-korero">Pin to top</button>
               <button id="export-md">Export as Markdown…</button>
               <button id="export-json">Export as JSON…</button>
               <button id="delete-korero" class="danger">Delete kōrero</button>
@@ -78,10 +81,11 @@
           <select id="provider-select" aria-label="Provider"></select>
           <select id="model-select" aria-label="Model"></select>
           <span id="destination" class="badge"></span>
-          <span id="agent-folder" class="badge folder hidden"></span>
+          <button type="button" id="agent-folder" class="badge folder hidden"></button>
+          <button type="button" id="agent-changes" class="badge hidden" title="Files the agent changed in this kōrero">Changed files</button>
           <select id="agent-mode" class="hidden" aria-label="How the agent asks">
             <option value="manual">Ask before acting</option>
-            <option value="acceptEdits">Allow file edits, ask for commands</option>
+            <option value="acceptEdits">Allow file edits (not hidden files), ask for commands</option>
             <option value="plan">Plan only, change nothing</option>
             <option value="auto">Auto: act without asking (Pātaka's guards still ask)</option>
           </select>
@@ -90,6 +94,7 @@
 
       <div id="model-banner" class="model-banner hidden" role="status">
         <span id="model-banner-text"></span>
+        <progress id="model-banner-bar" class="hidden" max="1" value="0"></progress>
         <button type="button" id="model-banner-install" class="primary">Install</button>
         <button type="button" id="model-banner-hide">Not now</button>
       </div>
@@ -103,14 +108,23 @@
 
       <div id="empty-agent" class="empty hidden">
         <h2>Agent</h2>
-        <p>Ask the agent to work in this folder: read and change files, run commands, fix bugs. It runs on Claude Code with your sign-in or API key.</p>
+        <p>Ask the agent to work in a project folder: read and change files, run commands, fix bugs. It runs on Claude Code with your sign-in or API key.</p>
+        <p>No folder yet? Start anyway, for mail, the calendar or a question: it works in a private, empty folder of its own. Choose a project folder above whenever you need one.</p>
         <p>Every request it makes to the model goes through Tūmataiti on this computer first: file contents, command output and your messages are redacted, and placeholders are filled back in before any tool runs here. Tapu content stops the request.</p>
         <p class="muted">It asks before running commands or changing files, unless you choose otherwise above. Network and MCP tools never receive real values.</p>
       </div>
 
+      <div id="precheck" class="precheck hidden" role="status" aria-live="polite"></div>
       <form id="composer" class="composer">
+        <div id="edit-bar" class="edit-bar hidden" role="status">
+          <span>Editing your message. Sending replaces it and everything after it.</span>
+          <button type="button" id="edit-cancel">Cancel</button>
+        </div>
+        <div id="attachments" class="attachments hidden" aria-label="Attached files"></div>
         <textarea id="input" rows="3" placeholder="Type a message. Enter to send, Shift+Enter for a new line." aria-label="Message"></textarea>
         <div class="composer-row">
+          <button type="button" id="attach" title="Attach text, PDF, Word, PowerPoint or Excel files. Their text is read on this device and redacted with your message.">📎 Attach</button>
+          <input type="file" id="attach-input" multiple hidden>
           <span id="route-note" class="muted small"></span>
           <button type="button" id="stop" class="hidden">Stop</button>
           <button type="submit" id="send" class="primary">Send</button>
@@ -169,6 +183,7 @@
         <button role="tab" data-tab="kaitiaki">Kaitiaki lists</button>
         <button role="tab" data-tab="claudecode">Claude Code</button>
         <button role="tab" data-tab="mail">Mail</button>
+        <button role="tab" data-tab="calendar">Calendar</button>
         <button role="tab" data-tab="security">Security &amp; data</button>
         <button role="tab" data-tab="audit">Audit log</button>
         <button role="tab" data-tab="about">Mātāpono</button>
@@ -205,6 +220,7 @@
             <option value="never">Never (blocked messages are still stopped)</option>
           </select></label>
         <label class="check"><input type="checkbox" id="policy-on-device"> Also redact for models on this device</label>
+        <label class="check"><input type="checkbox" id="precheck-on"> Show what Tūmataiti will replace while I type (a setting for this computer)</label>
         <button id="save-policy" class="primary">Save</button>
       </section>
 
@@ -239,6 +255,25 @@
             <button type="button" id="mail-register" class="primary">Offer it to every Claude Code</button>
             <button type="button" id="mail-unregister">Stop offering it</button>
             <button type="button" id="mail-disconnect" class="danger">Disconnect</button>
+          </div>
+        </div>
+      </section>
+
+      <section data-panel="calendar" class="panel hidden">
+        <h3>Pātaka Calendar</h3>
+        <p class="muted">Let Claude read your Google Calendar and add events to it. Everything Claude sees is redacted by Tūmataiti first. It adds events with nobody invited, so nobody is emailed; it changes or deletes only events it added; and every change can be undone in the Audit log tab.</p>
+        <div id="cal-status" class="status-box"></div>
+        <div id="cal-setup" class="hidden">
+          <p class="hint">Pātaka signs in with your own Google OAuth client, so no one else's app is involved. Once, in Google Cloud Console: create a project and enable the Google Calendar API; set up the consent screen as External, with your own address as a test user (it can stay in Testing); then create an OAuth client of type <strong>Desktop app</strong> and download its file.</p>
+          <div class="row"><button type="button" id="cal-connect" class="primary">Choose the client file and sign in…</button></div>
+          <p id="cal-waiting" class="small hidden"></p>
+        </div>
+        <div id="cal-connected" class="hidden">
+          <p id="cal-register-hint" class="hint"></p>
+          <div class="row">
+            <button type="button" id="cal-register" class="primary">Offer it to every Claude Code</button>
+            <button type="button" id="cal-unregister">Stop offering it</button>
+            <button type="button" id="cal-disconnect" class="danger">Disconnect</button>
           </div>
         </div>
       </section>
@@ -285,7 +320,7 @@
       <section data-panel="audit" class="panel hidden">
         <p class="muted">A record of what kind of information left this device, where it went, and under which kaupapa. It holds counts only: never message text and never placeholder values. Each entry is chained to the one before by a SHA-256 hash, so changes are detectable.</p>
         <div class="row"><button id="audit-verify">Verify chain</button><span id="audit-status" class="small"></span></div>
-        <div class="table-wrap"><table class="audit"><thead><tr><th>When</th><th>Event</th><th>Destination</th><th>Kōrero</th><th>Found</th><th>Kaupapa</th></tr></thead><tbody id="audit-rows"></tbody></table></div>
+        <div class="table-wrap"><table class="audit"><thead><tr><th>When</th><th>Event</th><th>Destination</th><th>Kōrero</th><th>Found</th><th>Kaupapa</th><th><span class="sr-only">Undo</span></th></tr></thead><tbody id="audit-rows"></tbody></table></div>
       </section>
 
       <section data-panel="about" class="panel hidden prose">
@@ -368,6 +403,52 @@
         <button value="cancel" id="ask-cancel">Cancel</button>
         <button value="ok" id="ask-ok" class="primary">Continue</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="changes-dialog" class="wide">
+    <form method="dialog" class="dialog-body">
+      <h2>Files the agent changed</h2>
+      <p class="muted small">Before the agent first changes a file, Pātaka keeps what it held (encrypted, on this device), so you can see the change and put the file back.</p>
+      <div id="changes-list" class="changes-list"></div>
+      <div class="dialog-actions"><button value="close" class="primary">Done</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="guide-dialog" class="wide">
+    <form method="dialog" class="dialog-body guide">
+      <h2>Getting started with Pātaka</h2>
+      <ol class="guide-steps">
+        <li>
+          <h3>Connect a model</h3>
+          <p>A model on this device (nothing leaves it), your Claude or ChatGPT subscription, or an API key. <span id="guide-model-state" class="muted"></span></p>
+          <button type="button" id="guide-connect">Connect a model…</button>
+        </li>
+        <li>
+          <h3>Noa and tapu</h3>
+          <p>A <strong>noa</strong> kōrero may go to any model, after Tūmataiti replaces personal and sensitive details with placeholders. A <strong>tapu</strong> kōrero only goes to models on this device, or ones you have marked sovereign. Switch a kōrero between them at the top of the chat.</p>
+        </li>
+        <li>
+          <h3>Tell Tūmataiti what to protect</h3>
+          <p>It finds NZ identifiers, contact details and secrets by itself, and names and places with the name model. Add the people, marae, hapū and terms that matter to you, or that must never leave, to your kaitiaki lists.</p>
+          <button type="button" id="guide-lists">Open the kaitiaki lists…</button>
+        </li>
+        <li>
+          <h3>See it work</h3>
+          <p>Put a sample message in the message box: as you type, Pātaka shows what it will replace, and before anything leaves it shows you exactly what will be sent.</p>
+          <button type="button" id="guide-sample">Try a sample message</button>
+        </li>
+      </ol>
+      <div class="dialog-actions"><button value="done" class="primary">Done</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="shortcuts-dialog">
+    <form method="dialog" class="dialog-body">
+      <h2>Keyboard shortcuts</h2>
+      <table class="shortcuts"><tbody id="shortcut-rows"></tbody></table>
+      <p><button type="button" id="open-guide">Show the getting-started guide</button></p>
+      <div class="dialog-actions"><button value="close" class="primary">Done</button></div>
     </form>
   </dialog>
 

@@ -58,8 +58,8 @@ pub struct Running {
     stopped: AtomicBool,
     /// Tools the person allowed for the rest of this session.
     always: Mutex<HashSet<String>>,
-    /// Permission requests waiting for the person: request id → (tool use id, tool name).
-    pending: Mutex<HashMap<String, (String, String)>>,
+    /// Permission requests waiting for the person: request id → (tool use id, tool name, input).
+    pending: Mutex<HashMap<String, (String, String, Value)>>,
     /// How each tool call was decided: tool use id → "allowed", "denied", "always".
     decided: Mutex<HashMap<String, String>>,
     /// The assistant message this turn writes into.
@@ -247,7 +247,11 @@ async fn spawn(
         .agent
         .clone()
         .ok_or_else(|| Error::Invalid("not an agent kōrero".into()))?;
-    let workspace = check_workspace(&info.workspace)?;
+    let workspace = if info.has_folder() {
+        check_workspace(&info.workspace)?
+    } else {
+        app.state::<AppState>().store.agent_scratch_dir(&conv.id)?
+    };
     let command = if provider.kind == ProviderKind::ClaudeCode {
         provider.command.clone()
     } else {
@@ -314,9 +318,11 @@ async fn spawn(
     .iter()
     .map(|s| s.to_string())
     .collect();
-    // Auto is decided by Pātaka, so Claude Code asks Pātaka about everything.
+    // Auto and "allow file edits" are decided by Pātaka, so Claude Code asks
+    // Pātaka about everything, and Pātaka keeps each file's original before
+    // the agent first changes it.
     args.push(match info.mode.as_str() {
-        "acceptEdits" | "plan" => info.mode.clone(),
+        "plan" => "plan".into(),
         _ => "manual".into(),
     });
     if !model.is_empty() && model != "default" {
@@ -632,10 +638,15 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
                         Some("auto mode")
                     } else if run.always.lock().unwrap_or_else(|e| e.into_inner()).contains(&tool) {
                         Some("always")
+                    } else if run.mode == "acceptEdits"
+                        && edited_file(&tool, &r["input"]).is_some_and(|p| plain_edit(&run.workspace, &p))
+                    {
+                        Some("file edits allowed")
                     } else {
                         None
                     };
                     if let Some(how) = how {
+                        record_change(app, korero, &run.workspace, &tool, &r["input"]);
                         let _ = run.write(&allow(&request_id, &r["input"])).await;
                         run.decided
                             .lock()
@@ -644,10 +655,10 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
                         return;
                     }
                 }
-                run.pending
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(request_id.clone(), (tool_use_id.clone(), tool.clone()));
+                run.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                    request_id.clone(),
+                    (tool_use_id.clone(), tool.clone(), r["input"].clone()),
+                );
                 emit(
                     app,
                     korero,
@@ -695,6 +706,82 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
     }
 }
 
+/// The file a file-changing tool call would change, if it is one.
+fn edited_file(tool: &str, input: &Value) -> Option<PathBuf> {
+    let p = match tool {
+        "Edit" | "Write" | "MultiEdit" => input["file_path"].as_str(),
+        "NotebookEdit" => input["notebook_path"].as_str(),
+        _ => None,
+    }?;
+    let p = PathBuf::from(p);
+    p.is_absolute().then_some(p)
+}
+
+/// Is `path` (which may not exist yet) inside the agent's folder?
+fn inside(workspace: &std::path::Path, path: &std::path::Path) -> bool {
+    let real = path.canonicalize().ok().or_else(|| {
+        path.parent()?
+            .canonicalize()
+            .ok()
+            .map(|d| d.join(path.file_name().unwrap_or_default()))
+    });
+    real.is_some_and(|r| r.starts_with(workspace))
+}
+
+/// May "allow file edits" change this file without asking? Only inside the
+/// folder, and never a hidden file or anything in a hidden folder: those
+/// include git hooks, Claude Code's own settings and hooks, `.envrc` and CI
+/// workflows, which can make later commands run code.
+fn plain_edit(workspace: &std::path::Path, path: &std::path::Path) -> bool {
+    if !inside(workspace, path) {
+        return false;
+    }
+    let rel = path.strip_prefix(workspace).unwrap_or(path);
+    !rel.components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+}
+
+/// Originals larger than this are not kept (the file cannot be put back).
+const MAX_ORIGINAL: u64 = 2 * 1024 * 1024;
+
+/// Before the agent first changes a file in this kōrero, keep what it held,
+/// so the person can see the change and put it back.
+fn record_change(app: &AppHandle, korero: &str, workspace: &std::path::Path, tool: &str, input: &Value) {
+    let Some(path) = edited_file(tool, input) else { return };
+    if !inside(workspace, &path) {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let _ = state.with_session(|s| {
+        let mut ch = state.store.load_agent_changes(&s.key, korero)?;
+        let key = path.display().to_string();
+        let t = now();
+        match ch.files.iter_mut().find(|f| f.path == key) {
+            Some(f) => {
+                f.last_at = t;
+                f.changes += 1;
+            }
+            None => {
+                let meta = std::fs::metadata(&path).ok();
+                let existed = meta.is_some();
+                let original = meta
+                    .filter(|m| m.is_file() && m.len() <= MAX_ORIGINAL)
+                    .and_then(|_| std::fs::read(&path).ok())
+                    .and_then(|b| String::from_utf8(b).ok());
+                ch.files.push(FileChange {
+                    path: key,
+                    existed,
+                    original,
+                    first_at: t,
+                    last_at: t,
+                    changes: 1,
+                });
+            }
+        }
+        state.store.save_agent_changes(&s.key, korero, &ch)
+    });
+}
+
 fn allow(request_id: &str, input: &Value) -> Value {
     json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id,
            "response": {"behavior": "allow", "updatedInput": input}}})
@@ -702,41 +789,50 @@ fn allow(request_id: &str, input: &Value) -> Value {
 
 // ---------------------------------------------------------------- commands
 
-#[tauri::command]
-pub async fn agent_create(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    workspace: Option<String>,
-) -> Result<Option<ConversationView>> {
+/// A new agent kōrero's title.
+const AGENT_TITLE: &str = "Agent";
+
+fn agent_title(path: &std::path::Path) -> String {
+    match path.file_name() {
+        Some(n) => format!("{AGENT_TITLE} · {}", n.to_string_lossy()),
+        None => AGENT_TITLE.into(),
+    }
+}
+
+/// Ask the person for a project folder. `None` if they cancel.
+fn pick_folder(app: &AppHandle) -> Result<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
-    state.with_session(|_| Ok(()))?;
-    let folder = match workspace {
-        Some(w) => w,
-        None => {
-            let Some(p) = app
-                .dialog()
-                .file()
-                .set_title("Choose the project folder the agent will work in")
-                .blocking_pick_folder()
-            else {
-                return Ok(None);
-            };
-            p.into_path()
-                .map_err(|_| Error::Invalid("That folder cannot be used.".into()))?
-                .display()
-                .to_string()
-        }
+    let Some(p) = app
+        .dialog()
+        .file()
+        .set_title("Choose the project folder the agent will work in")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
     };
-    let path = check_workspace(&folder)?;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Agent".into());
+    Ok(Some(
+        p.into_path()
+            .map_err(|_| Error::Invalid("That folder cannot be used.".into()))?
+            .display()
+            .to_string(),
+    ))
+}
+
+/// A new agent kōrero. With no `workspace` it starts without a project
+/// folder, working in a private scratch folder until one is chosen with
+/// `agent_set_folder`.
+#[tauri::command]
+pub async fn agent_create(state: State<'_, AppState>, workspace: Option<String>) -> Result<ConversationView> {
+    state.with_session(|_| Ok(()))?;
+    let path = match workspace.filter(|w| !w.trim().is_empty()) {
+        Some(w) => Some(check_workspace(&w)?),
+        None => None,
+    };
     state.with_session(|s| {
         let t = now();
         let c = Conversation {
             id: new_id(),
-            title: format!("Agent · {name}"),
+            title: path.as_deref().map(agent_title).unwrap_or_else(|| AGENT_TITLE.into()),
             classification: Classification::Noa,
             created_at: t,
             updated_at: t,
@@ -745,7 +841,7 @@ pub async fn agent_create(
             terms: Vec::new(),
             allow: Vec::new(),
             agent: Some(AgentInfo {
-                workspace: path.display().to_string(),
+                workspace: path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
                 session_id: None,
                 mode: "manual".into(),
             }),
@@ -755,6 +851,192 @@ pub async fn agent_create(
             &state.store.audit_path(),
             audit::Entry {
                 event: "agent-created".into(),
+                korero: Some(c.id.clone()),
+                ..Default::default()
+            },
+        )?;
+        Ok(commands::view_conversation(&c, false))
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedFile {
+    path: String,
+    /// The path inside the agent's folder, for showing.
+    relative: String,
+    existed: bool,
+    revertible: bool,
+    changes: u32,
+    last_at: i64,
+    /// What the file held before the agent's first change.
+    original: Option<String>,
+    /// What it holds now (`None` if it is gone, large, or not text).
+    current: Option<String>,
+    exists_now: bool,
+}
+
+/// The folder an agent kōrero works in: its project folder, or its scratch folder.
+fn agent_folder(state: &AppState, c: &Conversation) -> Result<PathBuf> {
+    let a = c
+        .agent
+        .as_ref()
+        .ok_or_else(|| Error::Invalid("not an agent kōrero".into()))?;
+    if a.has_folder() {
+        check_workspace(&a.workspace)
+    } else {
+        state.store.agent_scratch_dir(&c.id)
+    }
+}
+
+/// The files this agent kōrero changed, with their originals and how they are now.
+#[tauri::command]
+pub fn agent_changes(state: State<'_, AppState>, id: String) -> Result<Vec<ChangedFile>> {
+    state.with_session(|s| {
+        let c = state.store.load_conversation(&s.key, &id)?;
+        let folder = agent_folder(&state, &c).ok();
+        let mut files = state.store.load_agent_changes(&s.key, &id)?.files;
+        files.sort_by_key(|f| std::cmp::Reverse(f.last_at));
+        Ok(files
+            .into_iter()
+            .map(|f| {
+                let p = PathBuf::from(&f.path);
+                let meta = std::fs::metadata(&p).ok();
+                let current = meta
+                    .as_ref()
+                    .filter(|m| m.is_file() && m.len() <= MAX_ORIGINAL)
+                    .and_then(|_| std::fs::read(&p).ok())
+                    .and_then(|b| String::from_utf8(b).ok());
+                let relative = folder
+                    .as_ref()
+                    .and_then(|d| p.strip_prefix(d).ok())
+                    .map(|r| r.display().to_string())
+                    .unwrap_or_else(|| f.path.clone());
+                ChangedFile {
+                    revertible: f.revertible(),
+                    path: f.path,
+                    relative,
+                    existed: f.existed,
+                    changes: f.changes,
+                    last_at: f.last_at,
+                    original: f.original,
+                    current,
+                    exists_now: meta.is_some(),
+                }
+            })
+            .collect())
+    })
+}
+
+/// Put a file the agent changed back as it was before its first change: the
+/// original contents, or no file if the agent created it.
+#[tauri::command]
+pub fn agent_revert(state: State<'_, AppState>, id: String, path: String) -> Result<Vec<ChangedFile>> {
+    let running = state.agents.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
+    if running.as_ref().is_some_and(|r| r.busy.load(Ordering::SeqCst)) {
+        return Err(Error::Invalid(
+            "Wait for the agent to finish, or stop it, before putting files back.".into(),
+        ));
+    }
+    state.with_session(|s| {
+        let c = state.store.load_conversation(&s.key, &id)?;
+        let folder = agent_folder(&state, &c)?;
+        let mut ch = state.store.load_agent_changes(&s.key, &id)?;
+        let i = ch
+            .files
+            .iter()
+            .position(|f| f.path == path)
+            .ok_or_else(|| Error::Invalid("Pātaka has no record of that file.".into()))?;
+        let f = &ch.files[i];
+        let p = PathBuf::from(&f.path);
+        // Only ever inside the folder the agent works in, even if it has changed since.
+        if !inside(&folder, &p) {
+            return Err(Error::Invalid(
+                "That file is outside the agent's current folder, so Pātaka will not change it.".into(),
+            ));
+        }
+        match (&f.original, f.existed) {
+            (Some(o), true) => std::fs::write(&p, o.as_bytes())?,
+            (_, false) => {
+                if p.is_file() {
+                    std::fs::remove_file(&p)?;
+                }
+            }
+            (None, true) => {
+                return Err(Error::Invalid(
+                    "Pātaka did not keep this file's original (it was large, or not text), so it cannot put it back."
+                        .into(),
+                ))
+            }
+        }
+        ch.files.remove(i);
+        state.store.save_agent_changes(&s.key, &id, &ch)?;
+        audit::append(
+            &state.store.audit_path(),
+            audit::Entry {
+                event: "agent-file-restored".into(),
+                korero: Some(id.clone()),
+                ..Default::default()
+            },
+        )?;
+        Ok(())
+    })?;
+    agent_changes(state, id)
+}
+
+/// Choose (or change) the project folder an agent kōrero works in. With no
+/// `workspace` the person picks one; `None` back means they cancelled.
+/// Claude Code keeps its sessions per folder, so the agent starts a new
+/// session there; the kōrero's messages stay.
+#[tauri::command]
+pub async fn agent_set_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    workspace: Option<String>,
+) -> Result<Option<ConversationView>> {
+    state.with_session(|_| Ok(()))?;
+    let running = state.agents.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
+    if running.as_ref().is_some_and(|r| r.busy.load(Ordering::SeqCst)) {
+        return Err(Error::Invalid(
+            "Wait for the agent to finish before changing its folder.".into(),
+        ));
+    }
+    let folder = match workspace.filter(|w| !w.trim().is_empty()) {
+        Some(w) => w,
+        None => match pick_folder(&app)? {
+            Some(w) => w,
+            None => return Ok(None),
+        },
+    };
+    let path = check_workspace(&folder)?;
+    // The next message starts the agent again, in the new folder.
+    stop(&state, &id);
+    state.with_session(|s| {
+        let mut c = state.store.load_conversation(&s.key, &id)?;
+        let Some(a) = c.agent.as_mut() else {
+            return Err(Error::Invalid("not an agent kōrero".into()));
+        };
+        if a.is_terminal() {
+            return Err(Error::Invalid(
+                "This kōrero holds placeholders for Claude Code sessions in a terminal; its folder cannot change."
+                    .into(),
+            ));
+        }
+        // Keep a title the person chose; replace one Pātaka made.
+        let made =
+            c.title == AGENT_TITLE || (a.has_folder() && c.title == agent_title(std::path::Path::new(&a.workspace)));
+        a.workspace = path.display().to_string();
+        a.session_id = None;
+        if made {
+            c.title = agent_title(&path);
+        }
+        c.updated_at = now();
+        state.store.save_conversation(&s.key, &c)?;
+        audit::append(
+            &state.store.audit_path(),
+            audit::Entry {
+                event: "agent-folder".into(),
                 korero: Some(c.id.clone()),
                 ..Default::default()
             },
@@ -988,6 +1270,7 @@ async fn send_inner(
 
 #[tauri::command]
 pub async fn agent_permission(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     request_id: String,
@@ -1000,7 +1283,7 @@ pub async fn agent_permission(
         .get(&id)
         .cloned()
         .ok_or_else(|| Error::Invalid("The agent is not running.".into()))?;
-    let Some((tool_use_id, tool)) = run
+    let Some((tool_use_id, tool, input)) = run
         .pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1022,12 +1305,18 @@ pub async fn agent_permission(
         "always" if tool == "mcp__pataka-mail__trash" || tool == "mcp__pataka-calendar__delete_event" => "allowed",
         "always" => {
             // The tool comes from Pātaka's own record of the request, not the window.
-            run.always.lock().unwrap_or_else(|e| e.into_inner()).insert(tool);
+            run.always
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(tool.clone());
             "always"
         }
         "allow" => "allowed",
         _ => "denied",
     };
+    if how != "denied" {
+        record_change(&app, &id, &run.workspace, &tool, &input);
+    }
     run.decided
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1125,6 +1414,48 @@ pub fn stop(state: &AppState, korero: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_files_inside_the_folder_are_kept_and_put_back() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().canonicalize().unwrap();
+        std::fs::create_dir(ws.join("src")).unwrap();
+        assert!(inside(&ws, &ws.join("src/new.rs")), "a file not made yet");
+        assert!(inside(&ws, &ws.join("src")));
+        assert!(!inside(&ws, &ws.join("../elsewhere.txt")));
+        assert!(!inside(&ws, std::path::Path::new("/etc/hosts")));
+        let p = ws.join("a.txt").display().to_string();
+        assert_eq!(edited_file("Write", &json!({"file_path": p})), Some(ws.join("a.txt")));
+        assert_eq!(
+            edited_file("NotebookEdit", &json!({"notebook_path": p})),
+            Some(ws.join("a.txt"))
+        );
+        assert_eq!(
+            edited_file("Write", &json!({"file_path": "a.txt"})),
+            None,
+            "relative paths are not trusted"
+        );
+        assert_eq!(edited_file("Bash", &json!({"command": "ls"})), None);
+        assert!(plain_edit(&ws, &ws.join("src/new.rs")));
+        for hidden in [
+            ".git/hooks/pre-commit",
+            ".claude/settings.json",
+            ".envrc",
+            ".github/workflows/ci.yml",
+        ] {
+            assert!(!plain_edit(&ws, &ws.join(hidden)), "{hidden} must ask");
+        }
+        assert!(!plain_edit(&ws, std::path::Path::new("/etc/hosts")));
+    }
+
+    #[test]
+    fn agent_titles_name_their_folder() {
+        assert_eq!(
+            agent_title(std::path::Path::new("/work/kōrero-app")),
+            "Agent · kōrero-app"
+        );
+        assert_eq!(agent_title(std::path::Path::new("/")), AGENT_TITLE);
+    }
 
     #[test]
     fn workspace_must_be_a_project_folder() {

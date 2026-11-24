@@ -340,7 +340,58 @@ impl Store {
 
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
         valid_id(id)?;
-        shred(&self.conv_path(id))
+        shred(&self.conv_path(id))?;
+        // The kōrero is gone now; what it kept beside it goes too, as far
+        // as it can, without making the deletion look as if it failed.
+        let scratch = self.root.join("agents").join(id);
+        if scratch.exists() {
+            let _ = fs::remove_dir_all(&scratch);
+        }
+        let changes = self.changes_path(id);
+        if changes.exists() {
+            let _ = shred(&changes);
+        }
+        Ok(())
+    }
+
+    fn changes_path(&self, id: &str) -> PathBuf {
+        self.root.join("changes").join(format!("{id}.ptk"))
+    }
+
+    /// The files an agent kōrero changed (empty if none yet).
+    pub fn load_agent_changes(&self, key: &DataKey, id: &str) -> Result<crate::model::AgentChanges> {
+        valid_id(id)?;
+        let p = self.changes_path(id);
+        if !p.exists() {
+            return Ok(Default::default());
+        }
+        Self::open_json(key, &format!("pataka:agent-changes:{id}"), &fs::read(p)?)
+    }
+
+    pub fn save_agent_changes(&self, key: &DataKey, id: &str, c: &crate::model::AgentChanges) -> Result<()> {
+        valid_id(id)?;
+        let dir = self.root.join("changes");
+        fs::create_dir_all(&dir)?;
+        restrict(&dir);
+        write_atomic(
+            &self.changes_path(id),
+            &Self::seal_json(key, &format!("pataka:agent-changes:{id}"), c)?,
+        )
+    }
+
+    /// The private folder an agent kōrero works in until a project folder is
+    /// chosen for it. Made (owner-only) if it is not there yet, and removed
+    /// with the kōrero.
+    pub fn agent_scratch_dir(&self, id: &str) -> Result<PathBuf> {
+        valid_id(id)?;
+        let agents = self.root.join("agents");
+        let dir = agents.join(id);
+        fs::create_dir_all(&dir)?;
+        restrict(&agents);
+        restrict(&dir);
+        // Resolved, as project folders are, so paths inside compare equal
+        // even when the data folder sits behind a symlink (/tmp on macOS).
+        Ok(dir.canonicalize()?)
     }
 
     pub fn conversation_ids(&self) -> Result<Vec<String>> {
@@ -455,6 +506,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::new(dir.path().to_path_buf()).unwrap();
         assert!(s.delete_conversation("../settings").is_err());
+        assert!(s.agent_scratch_dir("../settings").is_err());
+    }
+
+    #[test]
+    fn an_agents_scratch_folder_goes_with_its_korero() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::new(dir.path().to_path_buf()).unwrap();
+        let id = crate::model::new_id();
+        let scratch = s.agent_scratch_dir(&id).unwrap();
+        assert!(scratch.is_dir() && scratch.starts_with(dir.path().canonicalize().unwrap()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&scratch).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        fs::write(scratch.join("notes.txt"), "x").unwrap();
+        // Asking again finds the same folder, files and all.
+        assert_eq!(s.agent_scratch_dir(&id).unwrap(), scratch);
+        assert!(scratch.join("notes.txt").exists());
+        s.delete_conversation(&id).unwrap();
+        assert!(!scratch.exists());
+        // A kōrero that never had one deletes as before.
+        s.delete_conversation(&crate::model::new_id()).unwrap();
     }
 
     #[test]

@@ -121,6 +121,88 @@ pub fn all(path: &Path) -> Result<Vec<Entry>> {
     read_all(path)
 }
 
+/// The entry an undo of `seq` acts on, with the whole log, after checking
+/// that the log is intact and that `seq` names one entry only.
+pub fn undo_target(path: &Path, seq: u64) -> Result<(Vec<Entry>, Entry)> {
+    use crate::error::Error;
+    if !verify(path).ok {
+        return Err(Error::Invalid(
+            "The audit log failed its hash-chain check, so Pātaka will not act on it. See `pataka audit verify`."
+                .into(),
+        ));
+    }
+    let entries = read_all(path)?;
+    if entries.iter().filter(|e| e.seq == seq).count() > 1 {
+        return Err(Error::Invalid(format!(
+            "Two audit entries are numbered {seq} (written at the same moment), so Pātaka will not guess which you mean."
+        )));
+    }
+    let entry = entries
+        .iter()
+        .find(|e| e.seq == seq)
+        .cloned()
+        .ok_or_else(|| Error::NotFound(format!("audit entry {seq}")))?;
+    Ok((entries, entry))
+}
+
+/// Which change an entry records, if it is one Pātaka can still undo:
+/// `"mail"` or `"calendar"`. Not an undo itself, not undone already, and not
+/// sharing its number with another entry.
+pub fn undoable(entries: &[Entry], e: &Entry) -> Option<&'static str> {
+    let index = UndoIndex::new(entries);
+    index.kind(e)
+}
+
+/// [`undoable`] for every entry of the log, in one pass over it.
+pub fn undoable_all(entries: &[Entry]) -> Vec<Option<&'static str>> {
+    let index = UndoIndex::new(entries);
+    entries.iter().map(|e| index.kind(e)).collect()
+}
+
+/// Which entries were undone, and which numbers appear more than once.
+struct UndoIndex {
+    undone_mail: std::collections::HashSet<u64>,
+    undone_calendar: std::collections::HashSet<u64>,
+    twice: std::collections::HashSet<u64>,
+}
+
+impl UndoIndex {
+    fn new(entries: &[Entry]) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        let mut i = UndoIndex {
+            undone_mail: Default::default(),
+            undone_calendar: Default::default(),
+            twice: Default::default(),
+        };
+        for e in entries {
+            if !seen.insert(e.seq) {
+                i.twice.insert(e.seq);
+            }
+            if let Some(n) = e.mail.as_ref().and_then(|r| r["undoes"].as_u64()) {
+                i.undone_mail.insert(n);
+            }
+            if let Some(n) = e.calendar.as_ref().and_then(|r| r["undoes"].as_u64()) {
+                i.undone_calendar.insert(n);
+            }
+        }
+        i
+    }
+
+    fn kind(&self, e: &Entry) -> Option<&'static str> {
+        let (kind, record, undone) = if e.event.starts_with("mail-") {
+            ("mail", e.mail.as_ref()?, &self.undone_mail)
+        } else if e.event.starts_with("calendar-") {
+            ("calendar", e.calendar.as_ref()?, &self.undone_calendar)
+        } else {
+            return None;
+        };
+        if record["action"].as_str().is_none_or(|a| a == "undo") {
+            return None;
+        }
+        (!undone.contains(&e.seq) && !self.twice.contains(&e.seq)).then_some(kind)
+    }
+}
+
 pub fn recent(path: &Path, limit: usize) -> Result<Vec<Entry>> {
     let all = read_all(path)?;
     let skip = all.len().saturating_sub(limit);
@@ -355,6 +437,46 @@ mod tests {
             event: event.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn only_live_changes_can_be_undone() {
+        let change = |seq, ev: &str, rec: serde_json::Value| {
+            let mut e = entry(ev);
+            e.seq = seq;
+            if ev.starts_with("mail-") {
+                e.mail = Some(rec);
+            } else {
+                e.calendar = Some(rec);
+            }
+            e
+        };
+        let log = vec![
+            change(1, "mail-archive", serde_json::json!({"action": "archive"})),
+            change(2, "calendar-create", serde_json::json!({"action": "create"})),
+            change(3, "calendar-undo", serde_json::json!({"action": "undo", "undoes": 2})),
+            change(4, "mail-label", serde_json::json!({"action": "label"})),
+            change(4, "mail-label", serde_json::json!({"action": "label"})),
+            entry("sent"),
+        ];
+        let kinds: Vec<_> = log.iter().map(|e| undoable(&log, e)).collect();
+        // 2 was undone by 3; 3 is an undo; the two 4s share a number.
+        assert_eq!(kinds, vec![Some("mail"), None, None, None, None, None]);
+    }
+
+    #[test]
+    fn undo_refuses_a_broken_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let a = append(&path, entry("mail-archive")).unwrap();
+        assert_eq!(undo_target(&path, a.seq).unwrap().1.seq, a.seq);
+        assert!(undo_target(&path, 99).is_err());
+        let text = fs::read_to_string(&path).unwrap().replace("mail-archive", "mail-trash");
+        fs::write(&path, text).unwrap();
+        assert!(undo_target(&path, a.seq)
+            .unwrap_err()
+            .to_string()
+            .contains("hash-chain"));
     }
 
     #[test]

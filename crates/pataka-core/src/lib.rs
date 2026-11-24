@@ -21,6 +21,7 @@ pub mod calendar;
 pub mod claude_hooks;
 pub mod crypto;
 pub mod error;
+pub mod extract;
 pub mod guards;
 pub mod mail;
 pub mod model;

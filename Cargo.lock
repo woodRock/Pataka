@@ -3455,6 +3455,7 @@ dependencies = [
 name = "pataka-desktop"
 version = "0.5.0"
 dependencies = [
+ "base64 0.22.1",
  "futures-util",
  "hex",
  "pataka-core",

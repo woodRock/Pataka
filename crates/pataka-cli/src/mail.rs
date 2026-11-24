@@ -7,7 +7,7 @@
 use pataka_core::audit;
 use pataka_core::error::{Error, Result};
 use pataka_core::mail::ops::Mailer;
-use pataka_core::mail::{self, Account, MailVault, Record};
+use pataka_core::mail::{self, Account, MailVault};
 use zeroize::Zeroizing;
 
 use crate::ctx::{self, Ctx};
@@ -151,52 +151,7 @@ pub fn connected(ctx: &Ctx) -> bool {
 
 pub fn undo(seq: u64) -> Result<i32> {
     let ctx = Ctx::open()?;
-    let path = ctx.store.audit_path();
-    if !audit::verify(&path).ok {
-        return Err(Error::Invalid(
-            "The audit log failed its hash-chain check, so Pātaka will not act on it. See `pataka audit verify`."
-                .into(),
-        ));
-    }
-    let entries = audit::all(&path)?;
-    if entries.iter().filter(|e| e.seq == seq).count() > 1 {
-        return Err(Error::Invalid(format!(
-            "Two audit entries are numbered {seq} (written at the same moment), so Pātaka will not guess which you mean."
-        )));
-    }
-    let entry = entries
-        .iter()
-        .find(|e| e.seq == seq)
-        .ok_or_else(|| Error::NotFound(format!("audit entry {seq}")))?;
-    let record: Record = entry
-        .mail
-        .clone()
-        .filter(|_| entry.event.starts_with("mail-"))
-        .and_then(|m| serde_json::from_value(m).ok())
-        .ok_or_else(|| Error::Invalid(format!("Entry {seq} is not a Pātaka Mail change.")))?;
-    if let Some(done) = entries
-        .iter()
-        .find(|e| e.mail.as_ref().is_some_and(|m| m["undoes"].as_u64() == Some(seq)))
-    {
-        return Err(Error::Invalid(format!(
-            "Entry {seq} was already undone (entry {}).",
-            done.seq
-        )));
-    }
-    let v = vault(&ctx);
-    let account = v.account()?;
-    if entry.provider.as_deref().is_some_and(|p| p != account.host) {
-        return Err(Error::Invalid(
-            "That change was made on a different mail server than the one connected now.".into(),
-        ));
-    }
-    let (out, text) = runtime()?.block_on(async {
-        let mut m = Mailer::connect(&account).await?;
-        let r = m.undo(&v, &record, seq).await;
-        m.close().await;
-        r
-    })?;
-    let n = mail::audit_record(&path, entry.korero.as_deref(), &account.host, &out)?;
+    let (text, n) = runtime()?.block_on(mail::undo_entry(&vault(&ctx), seq))?;
     println!("{text} (Logged as entry {n}.)");
     Ok(0)
 }
