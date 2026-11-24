@@ -150,8 +150,9 @@ Pātaka always asks before a change:
 
 - that touches **more than 25 messages**. It tells you how many, for example *"this archives 214 emails"*;
 - that moves messages to the **Trash**. It asks every time, and saying yes once does not allow it again;
-- of any kind in **auto mode**, until you answer **Yes, and don't ask again** for that tool. Email can contain instructions aimed at Claude, and auto mode's own checks read that same email, so every change needs your explicit yes: once per tool is enough. Bulk changes and the Trash still ask every time;
 - of any kind with permission prompts switched off (`bypassPermissions` or `dontAsk`). There is nobody to ask, so the change is refused. Switch to the default mode or auto mode to approve it.
+
+Every other change follows your permission mode. In **auto mode** Pātaka allows it without asking: you connected your mail to have Claude organise it, every change is logged and can be undone, and nothing is ever sent or deleted for good. In the default mode Claude Code asks as it does for any tool.
 
 `pataka claude` adds this check to the session itself, so it applies whether or not you ran `pataka hooks install`.
 
@@ -168,9 +169,9 @@ pataka claude
 > /tumataiti:inbox-triage
 ```
 
-It reads your own setup from `~/.claude/inbox-triage.md`: your label names, what belongs under each, and "hold rules" (people whose unread mail must stay in the inbox). That file is yours. It is not part of Pātaka and is never committed. Claude Code asks before reading it, because it is outside the project folder. To stop being asked, allow `Read(~/.claude/inbox-triage.md)` in your Claude Code permissions.
+It reads your own setup from `~/.claude/inbox-triage.md`: your label names, what belongs under each, and "hold rules" (people whose unread mail must stay in the inbox). That file is yours. It is not part of Pātaka and is never committed. Pātaka allows reading it without asking (with `pataka hooks install`, or in the desktop app), although it is outside the project folder. Only that file is allowed, and only if it is a real file, not a link to somewhere else.
 
-The skill labels and archives mail, and, with a calendar connected ([Calendar](#calendar)), adds clear-cut events to it: bookings and registrations you made, appointments, meeting invitations sent to you, and deadlines addressed to you. It checks the calendar first so nothing is added twice, writes where each event came from (subject, sender and thread) in its notes, and leaves out anything it would have to guess, listing those as events worth adding instead. It never sends, deletes, trashes or marks messages as read, and never deletes calendar events. Archiving more than 25 threads at once asks you first, as any bulk change does, and in auto mode each new event asks too. The report lists what it added with its `pataka calendar undo` entry. It is shown in your terminal with real names, but Anthropic only saw placeholders. You can add a "Calendar" section to `~/.claude/inbox-triage.md` to say which calendar to use and what to add or skip.
+The skill labels and archives mail, and, with a calendar connected ([Calendar](#calendar)), adds clear-cut events to it: bookings and registrations you made, appointments, meeting invitations sent to you, and deadlines addressed to you. It checks the calendar first so nothing is added twice, writes where each event came from (subject, sender and thread) in its notes, and leaves out anything it would have to guess, listing those as events worth adding instead. It never sends, deletes, trashes or marks messages as read, and never deletes calendar events. Archiving more than 25 threads at once asks you first, as any bulk change does, and in auto mode labelling, archiving and adding events happen without asking. The report lists what it added with its `pataka calendar undo` entry. It is shown in your terminal with real names, but Anthropic only saw placeholders. You can add a "Calendar" section to `~/.claude/inbox-triage.md` to say which calendar to use and what to add or skip.
 
 ### Every Claude Code
 
@@ -245,13 +246,13 @@ Run `pataka claude` as usual. While a calendar is connected, Claude Code gets th
 | `list_calendars` | Your calendars: id, name, whether Pātaka can add events to it, time zone | no |
 | `events` | Events in a time range (a week from now unless given), soonest first, optionally matching some words. Shows how many guests an event has, never who they are | no |
 | `event` | One event in full, with its description (cut at about 4 KB) | no |
-| `create_event` | Add an event: title, start, end (an hour, or the one day, if left out), place, notes, pop-up reminders. **Nobody is invited and nobody is emailed** | in auto mode |
-| `update_event` | Change an event Pātaka added | in auto mode |
+| `create_event` | Add an event: title, start, end (an hour, or the one day, if left out), place, notes, pop-up reminders. **Nobody is invited and nobody is emailed** | by your mode |
+| `update_event` | Change an event Pātaka added | by your mode |
 | `delete_event` | Delete an event Pātaka added | always |
 
 Times are `2026-12-03` for a whole day, or `2026-12-03T14:30` in the calendar's own time zone (an offset such as `+13:00` works too). Events Pātaka adds carry a private mark, and `update_event` and `delete_event` refuse every other event: invitations from other people, and anything you made yourself. Every change goes to Google with `sendUpdates=none`, so Google emails nobody.
 
-In auto mode every change asks, until you answer **Yes, and don't ask again** for that tool. The request to add an event usually comes from an email or an invitation, which can carry instructions aimed at Claude. Deleting asks every time.
+In auto mode Pātaka adds and changes events without asking; each is logged and can be undone. In the default mode Claude Code asks as it does for any tool. Deleting asks every time.
 
 While a calendar is connected, `pataka claude` switches off claude.ai connectors (such as Google Calendar) for its sessions, because they would read your calendar on Anthropic's side, unredacted.
 

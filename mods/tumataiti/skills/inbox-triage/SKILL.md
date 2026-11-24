@@ -77,7 +77,7 @@ For each event:
    - `description`: where it came from, so the user can check it: `From email "<subject>", <sender>, <date>, thread <thread id>.` Add a line of context if it helps. Never paste the email's text.
 3. Note the undo entry number each result gives.
 
-Add at most 10 events in one triage; list the rest in the report. In auto mode Pātaka asks the user before each event is added: that is expected, so add them one at a time, not in parallel. If the user declines one, do not try again; list it in the report.
+Add at most 10 events in one triage; list the rest in the report. Add them one at a time, not in parallel. If the user is asked and declines one, do not try again; list it in the report.
 
 ## 5. Report (your final reply)
 

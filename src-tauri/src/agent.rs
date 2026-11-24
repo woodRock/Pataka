@@ -625,14 +625,9 @@ async fn on_message(app: &AppHandle, korero: &str, run: &Arc<Running>, v: &Value
                 let tool = r["tool_name"].as_str().unwrap_or("").to_string();
                 let tool_use_id = r["tool_use_id"].as_str().unwrap_or("").to_string();
                 // Pātaka's guards ask whatever the mode or earlier answers.
-                let always = run.always.lock().unwrap_or_else(|e| e.into_inner()).contains(&tool);
-                // In auto mode every mail change asks, unless the person chose
-                // "always" for that tool (trash and bulk changes still ask).
-                let guard = if run.mode == "auto" && !always {
-                    guards::review_tool_auto(&tool, &r["input"], &run.workspace)
-                } else {
-                    guards::review_tool(&tool, &r["input"], &run.workspace)
-                };
+                // Auto mode makes ordinary mail and calendar changes without
+                // asking; trash, bulk changes and deletions still ask.
+                let guard = guards::review_tool(&tool, &r["input"], &run.workspace);
                 if guard.is_none() {
                     let how = if run.mode == "auto" {
                         Some("auto mode")
