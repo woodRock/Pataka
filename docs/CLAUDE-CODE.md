@@ -132,6 +132,7 @@ Run `pataka claude` as usual. While a mailbox is connected, Claude Code gets the
 | `read` | One message as plain text, with attachment names and sizes | no |
 | `attachment` | The text of a PDF attachment, read on this computer and redacted like an email. Long PDFs come a part at a time (`pages: "5-"`). Images, scanned PDFs and other files are refused, and nothing of them is sent | no |
 | `thread` | A whole Gmail thread, oldest first: every message with date, sender, recipients, labels and UNREAD or read | no |
+| `threads` | Up to 5 whole threads in one call, each as `thread` gives it. Faster than one `thread` call each | no |
 | `drafts` | Drafts, newest first (a message still in Drafts has not been sent) | no |
 | `list_labels` | Labels or folders, with counts | no |
 | `label` | Add or remove labels | as your Claude Code settings say |

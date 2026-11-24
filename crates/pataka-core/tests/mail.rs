@@ -589,7 +589,7 @@ async fn mail_end_to_end() {
         .json()
         .await
         .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 14);
     // Not for sessions without mail, and never for a browser.
     let r = client
         .post(format!("{other}/pataka/mcp"))
@@ -859,6 +859,34 @@ async fn threads_drafts_and_nested_labels() {
         "{t}"
     );
     assert_eq!(m.thread(&boss_id).await.unwrap(), t);
+
+    // Several threads in one call; one that cannot be read says so.
+    let ctx = pataka_core::mail::mcp::McpContext {
+        vault: MailVault {
+            store: store.clone(),
+            key: key.clone(),
+        },
+        audit: dir.path().join("audit.jsonl"),
+        korero: "k".into(),
+    };
+    let both = pataka_core::mail::mcp::call(&ctx, "threads", &json!({"threads": ["thread_77", "thread_ff"]}))
+        .await
+        .unwrap();
+    assert!(
+        both.contains("=== Thread 1 of 2: thread_77 ===")
+            && both.contains(&t)
+            && both.contains("=== Thread 2 of 2: thread_ff ===\nCould not read it"),
+        "{both}"
+    );
+    let six: Vec<String> = (0..6).map(|i| format!("thread_{i:x}")).collect();
+    assert!(
+        pataka_core::mail::mcp::call(&ctx, "threads", &json!({ "threads": six }))
+            .await
+            .is_err()
+    );
+    assert!(pataka_core::mail::mcp::call(&ctx, "threads", &json!({"threads": []}))
+        .await
+        .is_err());
     m.read(&boss_id).await.unwrap();
     assert!(unread(13), "reading marked the boss's message as read");
 

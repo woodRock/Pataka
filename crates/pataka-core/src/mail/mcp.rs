@@ -18,7 +18,19 @@ const PROTOCOL: &str = "2025-06-18";
 const KNOWN_PROTOCOLS: [&str; 4] = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
 
 /// Tools that only read. Everything else changes the mailbox.
-pub const READ_TOOLS: [&str; 6] = ["search", "read", "thread", "attachment", "drafts", "list_labels"];
+pub const READ_TOOLS: [&str; 7] = [
+    "search",
+    "read",
+    "thread",
+    "threads",
+    "attachment",
+    "drafts",
+    "list_labels",
+];
+
+/// Threads one `threads` call reads at most: more would often pass the size
+/// at which Claude Code saves a result to a file and reads it back in parts.
+pub const THREADS_LIMIT: usize = 5;
 pub const WRITE_TOOLS: [&str; 7] = ["label", "move", "archive", "mark", "create_label", "trash", "draft"];
 
 pub struct McpContext {
@@ -52,6 +64,13 @@ pub fn tools() -> Value {
          "description": "Read a whole Gmail thread, oldest first: every message with date, from, to, labels, UNREAD or read, and its text. Takes a thread id (thread_…) or any message id in it. Never marks anything as read.",
          "inputSchema": {"type": "object", "properties": {"thread": {"type": "string"}}, "required": ["thread"]},
          "annotations": {"title": "Read email thread", "readOnlyHint": true, "openWorldHint": false}},
+        {"name": "threads",
+         "description": "Read up to 5 whole threads in one call, each as thread does, one after another. Faster than calling thread for each: use it whenever you need several. A thread that cannot be read says why, and the rest are still read.",
+         "inputSchema": {"type": "object", "properties": {
+             "threads": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": THREADS_LIMIT,
+                         "description": "Thread ids (thread_…) or message ids"}},
+             "required": ["threads"]},
+         "annotations": {"title": "Read email threads", "readOnlyHint": true, "openWorldHint": false}},
         {"name": "attachment",
          "description": "Read the text of one attachment, by the name read or thread lists. Only PDFs with a text layer so far: the text is read on this computer and redacted like an email; pictures in the PDF are not read. Images, scanned PDFs and other files are refused. Long PDFs come a part at a time: pass pages (e.g. \"5-\") to read on.",
          "inputSchema": {"type": "object", "properties": {
@@ -191,6 +210,30 @@ async fn run(m: &mut Mailer, ctx: &McpContext, from: &str, name: &str, a: &Value
             m.thread(a["thread"].as_str().or(a["id"].as_str()).unwrap_or(""))
                 .await?,
         ),
+        "threads" => {
+            let wanted = strings(&a["threads"]);
+            if wanted.is_empty() {
+                return Err(Error::Invalid("Give at least one thread id.".into()));
+            }
+            if wanted.len() > THREADS_LIMIT {
+                return Err(Error::Invalid(format!(
+                    "At most {THREADS_LIMIT} threads at once; split the rest into another call."
+                )));
+            }
+            let n = wanted.len();
+            let mut out = String::new();
+            for (i, t) in wanted.iter().enumerate() {
+                if i > 0 {
+                    out.push_str("\n\n");
+                }
+                out.push_str(&format!("=== Thread {} of {n}: {} ===\n", i + 1, t.trim()));
+                match m.thread(t).await {
+                    Ok(text) => out.push_str(&text),
+                    Err(e) => out.push_str(&format!("Could not read it: {e}")),
+                }
+            }
+            Done::Read(out)
+        }
         "drafts" => Done::Read(
             m.drafts(a["limit"].as_u64().unwrap_or(SEARCH_LIMIT as u64) as usize)
                 .await?,
