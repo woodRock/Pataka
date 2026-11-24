@@ -289,6 +289,42 @@ fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Where an earlier message quoted in a reply begins: Gmail's "On … wrote:"
+/// (perhaps over two lines), Outlook's "-----Original Message-----", or a
+/// "From:" line followed within a few lines by "Sent:" or "Date:".
+static REPLY_HEADER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?m)^(?:On [^\n]{1,300}(?:\n[^\n]{0,200})?wrote:\s*$|-{2,} ?Original Message ?-{2,}\s*$|_{20,}\s*\nFrom: |From: [^\n]+\n(?:[^\n]*\n){0,3}(?:Sent|Date): )")
+        .expect("pattern compiles")
+});
+
+/// A reply's own words: what comes before the earlier messages it quotes
+/// (lines starting with `>`, and everything after a reply header or a `-- `
+/// signature line). Whether anything was left out. A forwarded message
+/// ("Forwarded message") is kept whole: it is not in the thread elsewhere.
+fn own_words(body: &str) -> (String, bool) {
+    if body.contains("Forwarded message") || body.contains("Begin forwarded message") {
+        return (body.to_string(), false);
+    }
+    let mut end = body.len();
+    if let Some(m) = REPLY_HEADER.find(body) {
+        end = m.start();
+    }
+    if let Some(i) = body[..end].find("\n-- \n") {
+        end = i;
+    }
+    let kept: Vec<&str> = body[..end]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('>'))
+        .collect();
+    let own = kept.join("\n").trim_end().to_string();
+    let left_out = own.len() < body.trim_end().len();
+    if own.trim().is_empty() {
+        // Nothing but quotes: keep it as it is rather than show nothing.
+        return (body.to_string(), false);
+    }
+    (own, left_out)
+}
+
 fn cut(s: &str, max: usize) -> (String, bool) {
     if s.len() <= max {
         return (s.to_string(), false);
@@ -1057,7 +1093,10 @@ impl Mailer {
             .into_iter()
             .next()
             .ok_or_else(|| Error::NotFound("that message".into()))?;
-        Ok(format!("{UNTRUSTED}\n\n{}", self.render(&f, &folder, BODY_LIMIT)?))
+        Ok(format!(
+            "{UNTRUSTED}\n\n{}",
+            self.render(&f, &folder, BODY_LIMIT, false)?
+        ))
     }
 
     /// The text of one attachment, read on this computer. Only PDFs with a
@@ -1165,8 +1204,10 @@ impl Mailer {
         }
     }
 
-    /// One message as text: its fields, attachment names and the body, cut at `cap` bytes.
-    fn render(&self, f: &Fetched, folder: &str, cap: usize) -> Result<String> {
+    /// One message as text: its fields, attachment names and the body, cut at
+    /// `cap` bytes. With `own_only`, earlier messages it quotes and its
+    /// signature are left out (`own_words`).
+    fn render(&self, f: &Fetched, folder: &str, cap: usize, own_only: bool) -> Result<String> {
         let s = self.summary(f, folder);
         let m = f
             .body()
@@ -1208,9 +1249,17 @@ impl Mailer {
             ));
         }
         let body = m.body_text(0).unwrap_or_default().replace("\r\n", "\n");
-        let (body, cut_short) = cut(body.trim(), cap);
+        let (body, quotes_left_out) = if own_only {
+            own_words(body.trim())
+        } else {
+            (body.trim().to_string(), false)
+        };
+        let (body, cut_short) = cut(&body, cap);
         out.push_str("\n\n");
         out.push_str(&body);
+        if quotes_left_out {
+            out.push_str("\n[earlier messages it quotes, and its signature, left out by Pātaka: read this message by its id for all of it]");
+        }
         if cut_short {
             out.push_str("\n[… the rest of this email was cut by Pātaka to keep the result short]");
         }
@@ -1259,7 +1308,9 @@ impl Mailer {
         let mut budget = THREAD_LIMIT;
         for (i, f) in fetched.iter().enumerate() {
             let cap = BODY_LIMIT.min(budget / (fetched.len() - i).max(1)).max(1024);
-            let text = self.render(f, &all, cap)?;
+            // Each reply quotes the messages before it, which are already
+            // here: only its own words are shown. The first is kept whole.
+            let text = self.render(f, &all, cap, i > 0)?;
             budget = budget.saturating_sub(text.len());
             out.push_str(&format!("\n\n--- message {} of {} ---\n{text}", i + 1, fetched.len()));
         }
@@ -2084,6 +2135,29 @@ impl Mailer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_keep_only_their_own_words() {
+        let gmail = "Sounds good, Tuesday works.\n\nOn Mon, 24 Nov 2026 at 10:00, Aroha <a@example.nz> wrote:\n> Can we meet Tuesday?\n> Thanks";
+        assert_eq!(own_words(gmail), ("Sounds good, Tuesday works.".to_string(), true));
+        let wrapped = "Yes.\n\nOn Mon, 24 Nov 2026 at 10:00, Aroha Ngata <a@example.nz>\nwrote:\n\n> Can we meet?";
+        assert_eq!(own_words(wrapped).0, "Yes.");
+        let outlook = "Approved.\n\nKind regards\n\nFrom: Mere <m@example.nz>\nSent: Monday, 24 November 2026 10:00\nTo: Me\nSubject: Leave\n\nCan I take Friday off?";
+        assert_eq!(own_words(outlook).0, "Approved.\n\nKind regards");
+        let sig = "See you then.\n-- \nDr Someone\nSchool of Engineering\n+64 4 000 0000";
+        assert_eq!(own_words(sig), ("See you then.".to_string(), true));
+        let original = "Done.\n\n-----Original Message-----\nFrom: x\nPlease do it";
+        assert_eq!(own_words(original).0, "Done.");
+        // Forwards, plain messages and quote-only messages are kept whole.
+        let fwd =
+            "FYI\n\n---------- Forwarded message ---------\nFrom: Bank <b@example.nz>\nDate: Mon\n\nYour statement";
+        assert_eq!(own_words(fwd), (fwd.to_string(), false));
+        assert_eq!(
+            own_words("Kia ora, just checking in."),
+            ("Kia ora, just checking in.".to_string(), false)
+        );
+        assert!(!own_words("> only a quote").1);
+    }
 
     #[test]
     fn ids_round_trip() {
