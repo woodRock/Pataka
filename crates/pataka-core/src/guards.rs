@@ -183,16 +183,16 @@ pub fn is_mail_mutation(tool: &str) -> bool {
     mail_tool(tool).is_some_and(|t| !crate::mail::mcp::READ_TOOLS.contains(&t))
 }
 
-/// Pātaka Mail's own rule. Reading never asks. `trash` always asks. Other
-/// changes ask when they touch more than `MAIL_BULK` messages, and, when
-/// `strict` (auto mode, where nobody else would ask), always: email is
-/// untrusted input that can carry instructions aimed at Claude, so every
-/// change needs the person's explicit yes there.
+/// Pātaka Mail's own rule, in every mode. Reading never asks. `trash` always
+/// asks, and so do changes that touch more than `MAIL_BULK` messages and
+/// tools this version does not know. Other changes are left to the mode:
+/// once the person has connected their mail, auto mode makes them without
+/// asking (each is logged and can be undone).
 ///
 /// A draft that attaches a file (or reads an `email.json`) outside
 /// `workspace` always asks, naming the file; with no workspace known, any
 /// file asks.
-pub fn review_mail(tool: &str, input: &Value, strict: bool, workspace: Option<&Path>) -> Option<String> {
+pub fn review_mail(tool: &str, input: &Value, workspace: Option<&Path>) -> Option<String> {
     let name = mail_tool(tool)?;
     if crate::mail::mcp::READ_TOOLS.contains(&name) {
         return None;
@@ -229,7 +229,7 @@ pub fn review_mail(tool: &str, input: &Value, strict: bool, workspace: Option<&P
         "draft" => "this saves a draft email in Drafts (it is not sent)".to_string(),
         other => format!("this changes your mailbox ({other})"),
     };
-    (strict || n > MAIL_BULK || !crate::mail::mcp::WRITE_TOOLS.contains(&name)).then_some(what)
+    (n > MAIL_BULK || !crate::mail::mcp::WRITE_TOOLS.contains(&name)).then_some(what)
 }
 
 /// The part of a Pātaka Calendar tool name after `mcp__pataka-calendar__`.
@@ -237,12 +237,11 @@ fn calendar_tool(tool: &str) -> Option<&str> {
     tool.strip_prefix(crate::calendar::TOOL_PREFIX)
 }
 
-/// Pātaka Calendar's own rule, like mail's. Reading never asks. Deleting
-/// always asks. Adding and changing events ask when `strict` (auto mode,
-/// where nobody else would ask): the request to add an event usually comes
-/// from an email or an invitation, which can carry instructions aimed at
-/// Claude, so each needs the person's explicit yes there.
-pub fn review_calendar(tool: &str, input: &Value, strict: bool) -> Option<String> {
+/// Pātaka Calendar's own rule, like mail's. Reading never asks. Deleting,
+/// and tools this version does not know, always ask. Adding and changing
+/// events (only ever events Pātaka added, with nobody invited) are left to
+/// the mode, so auto mode makes them without asking.
+pub fn review_calendar(tool: &str, input: &Value) -> Option<String> {
     let name = calendar_tool(tool)?;
     if crate::calendar::mcp::READ_TOOLS.contains(&name) {
         return None;
@@ -263,7 +262,7 @@ pub fn review_calendar(tool: &str, input: &Value, strict: bool) -> Option<String
         "update_event" => "this changes an event Pātaka added to your Google Calendar".into(),
         other => format!("this changes your calendar ({other})"),
     };
-    (strict || !crate::calendar::mcp::WRITE_TOOLS.contains(&name)).then_some(what)
+    (!crate::calendar::mcp::WRITE_TOOLS.contains(&name)).then_some(what)
 }
 
 /// A tool of one of Pātaka's own MCP servers, which its hook judges in
@@ -273,27 +272,34 @@ pub fn is_local_server_tool(tool: &str) -> bool {
 }
 
 /// The rule for one of Pātaka's own MCP servers' tools.
-pub fn review_local(tool: &str, input: &Value, strict: bool, workspace: Option<&Path>) -> Option<String> {
+pub fn review_local(tool: &str, input: &Value, workspace: Option<&Path>) -> Option<String> {
     if calendar_tool(tool).is_some() {
-        return review_calendar(tool, input, strict);
+        return review_calendar(tool, input);
     }
-    review_mail(tool, input, strict, workspace)
+    review_mail(tool, input, workspace)
 }
 
-/// `review_tool` for a session in auto mode: the same, except that every
-/// Pātaka Mail change asks.
-pub fn review_tool_auto(tool: &str, input: &Value, workspace: &Path) -> Option<String> {
-    if is_local_server_tool(tool) {
-        return review_local(tool, input, true, Some(workspace));
-    }
-    review_tool(tool, input, workspace)
+/// The person's own setup for the inbox-triage skill,
+/// `~/.claude/inbox-triage.md`, which the skill reads at the start of every
+/// run. Reading it never asks. Only the real file counts, not a link to
+/// somewhere else.
+pub fn is_triage_setup(path: &str) -> bool {
+    let Some(h) = home() else { return false };
+    let target = h.join(".claude").join("inbox-triage.md");
+    let p = match path.strip_prefix("~/") {
+        Some(rest) => h.join(rest),
+        None => PathBuf::from(path),
+    };
+    p.is_absolute()
+        && normalise(&h, &p) == target
+        && std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_file())
 }
 
 /// Why this tool call must be approved, if it must (`None`: Pātaka's guards
 /// have no objection).
 pub fn review_tool(tool: &str, input: &Value, workspace: &Path) -> Option<String> {
     if is_local_server_tool(tool) {
-        return review_local(tool, input, false, Some(workspace));
+        return review_local(tool, input, Some(workspace));
     }
     if tool.starts_with("mcp__") {
         return Some("it sends data to an MCP server".into());
@@ -304,6 +310,9 @@ pub fn review_tool(tool: &str, input: &Value, workspace: &Path) -> Option<String
         "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "NotebookRead" | "Glob" | "Grep" | "LS" => {
             for key in ["file_path", "notebook_path", "path"] {
                 if let Some(p) = input[key].as_str().filter(|p| !p.is_empty()) {
+                    if tool == "Read" && is_triage_setup(p) {
+                        continue;
+                    }
                     if outside(p, workspace) {
                         return Some(format!("it reaches outside the project folder ({p})"));
                     }
@@ -377,21 +386,19 @@ mod tests {
     }
 
     #[test]
-    fn calendar_reads_never_ask_and_changes_ask_in_auto_mode() {
+    fn calendar_reads_and_changes_are_left_to_the_mode() {
         for t in crate::calendar::mcp::READ_TOOLS {
             let tool = format!("mcp__pataka-calendar__{t}");
-            assert_eq!(review_calendar(&tool, &json!({}), true), None);
+            assert_eq!(review_calendar(&tool, &json!({})), None);
             assert_eq!(review_tool(&tool, &json!({}), &ws()), None);
         }
         let add = "mcp__pataka-calendar__create_event";
         let input = json!({"title": "Hui", "start": "2026-12-03T10:00"});
         assert_eq!(review_tool(add, &input, &ws()), None);
-        let why = review_tool_auto(add, &input, &ws()).unwrap();
-        assert!(
-            why.contains("Hui") && why.contains("2026-12-03T10:00") && why.contains("nobody"),
-            "{why}"
+        assert_eq!(
+            review_tool("mcp__pataka-calendar__update_event", &json!({}), &ws()),
+            None
         );
-        assert!(review_tool_auto("mcp__pataka-calendar__update_event", &json!({}), &ws()).is_some());
         // Deleting always asks; a tool this version does not know asks too.
         assert!(review_tool("mcp__pataka-calendar__delete_event", &json!({}), &ws()).is_some());
         assert!(review_tool("mcp__pataka-calendar__clear", &json!({}), &ws()).is_some());
@@ -402,7 +409,6 @@ mod tests {
         for t in ["search", "read", "thread", "attachment", "drafts", "list_labels"] {
             let tool = format!("mcp__pataka-mail__{t}");
             assert!(review_tool(&tool, &json!({"query": "from:x"}), &ws()).is_none(), "{t}");
-            assert!(review_tool_auto(&tool, &json!({}), &ws()).is_none(), "{t}");
         }
         // Another server with a similar name still asks.
         assert!(review_tool("mcp__pataka-mailer__search", &json!({}), &ws()).is_some());
@@ -452,8 +458,8 @@ mod tests {
             assert!(why.contains("outside the project folder"), "{far}: {why}");
         }
         // With no folder known, any file asks; a plain draft does not.
-        assert!(review_mail(draft, &inside, false, None).is_some());
-        assert!(review_mail(draft, &json!({"body": "x"}), false, None).is_none());
+        assert!(review_mail(draft, &inside, None).is_some());
+        assert!(review_mail(draft, &json!({"body": "x"}), None).is_none());
     }
 
     #[test]
@@ -478,27 +484,34 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_asks_for_every_mail_change() {
-        for t in [
-            "label",
-            "move",
-            "archive",
-            "mark",
-            "create_label",
-            "trash",
-            "something_new",
-        ] {
+    fn small_mail_changes_are_left_to_the_mode() {
+        for t in ["label", "move", "archive", "mark", "create_label", "draft"] {
             let tool = format!("mcp__pataka-mail__{t}");
             assert!(
-                review_tool_auto(&tool, &json!({"ids": ids(1), "name": "x"}), &ws()).is_some(),
+                review_tool(&tool, &json!({"ids": ids(1), "name": "x"}), &ws()).is_none(),
                 "{t}"
             );
             assert!(is_mail_mutation(&tool));
         }
+        // Trash and tools this version does not know still ask.
+        assert!(review_tool("mcp__pataka-mail__trash", &json!({"ids": ids(1)}), &ws()).is_some());
+        assert!(review_tool("mcp__pataka-mail__something_new", &json!({"ids": ids(1)}), &ws()).is_some());
         assert!(!is_mail_mutation("mcp__pataka-mail__search"));
         assert!(!is_mail_mutation("mcp__slack__send"));
-        // Outside mail, auto mode reviews exactly as before.
-        assert!(review_tool_auto("Bash", &json!({"command": "ls"}), &ws()).is_none());
-        assert!(review_tool_auto("Bash", &json!({"command": "curl x"}), &ws()).is_some());
+    }
+
+    #[test]
+    fn only_the_real_triage_setup_is_read_freely() {
+        let Some(h) = home() else { return };
+        let setup = h.join(".claude").join("inbox-triage.md");
+        let real = std::fs::symlink_metadata(&setup).is_ok_and(|m| m.file_type().is_file());
+        let read = |p: &str| review_tool("Read", &json!({"file_path": p}), &ws());
+        assert_eq!(read(&setup.display().to_string()).is_none(), real);
+        assert_eq!(read("~/.claude/inbox-triage.md").is_none(), real);
+        // Neighbours, tricks with .., and changes to it still ask.
+        assert!(read("~/.claude/settings.json").is_some());
+        assert!(read("~/.claude/x/../../.ssh/id_ed25519").is_some());
+        assert!(!is_triage_setup("inbox-triage.md"));
+        assert!(review_tool("Edit", &json!({"file_path": setup.display().to_string()}), &ws()).is_some());
     }
 }

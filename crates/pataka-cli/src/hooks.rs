@@ -214,58 +214,45 @@ fn defers_to_session(input: &Value) -> bool {
         .is_some_and(|m| DEFERRING_MODES.contains(&m))
 }
 
-/// Pātaka Mail's answer, in any mode. Changes that need approval ask; in
-/// auto mode every change asks, because email is untrusted input that can
-/// carry instructions aimed at Claude, and its auto-mode checks read that
-/// same input. With prompts switched off (`bypassPermissions`, `dontAsk`)
-/// nobody could say yes, so the change is refused.
+/// The answer for Pātaka's own mail and calendar tools, in any mode.
+/// Changes that always need a yes (trash, bulk changes, deleting an event,
+/// files from outside the folder) ask; with prompts switched off
+/// (`bypassPermissions`, `dontAsk`) nobody could say yes, so they are
+/// refused. Everything else is allowed in auto mode: the person connected
+/// the account to have Claude use it, every change is logged and can be
+/// undone, and nothing is ever sent or deleted for good. In the other modes
+/// it is left to Claude Code's own settings.
 fn mail_decision(input: &Value) -> Option<Value> {
     let tool = input["tool_name"].as_str().unwrap_or("");
-    let cwd = input["cwd"].as_str().map(PathBuf::from);
-    mail_decision_with(input, allowed_by_rule(tool, &settings_files(cwd.as_deref())))
-}
-
-/// Claude Code's settings files that can hold permission rules: user,
-/// user-local, project and project-local.
-fn settings_files(cwd: Option<&std::path::Path>) -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Ok(user) = pataka_core::claude_hooks::settings_path() {
-        v.push(user.with_file_name("settings.local.json"));
-        v.push(user);
+    let cwd = input["cwd"]
+        .as_str()
+        .map(PathBuf::from)
+        .map(|c| c.canonicalize().unwrap_or(c));
+    let mut tool_input = input["tool_input"].clone();
+    if tool.starts_with(pataka_core::mail::TOOL_PREFIX) && tool.ends_with("__draft") {
+        restore_draft_paths(&mut tool_input);
     }
-    if let Some(c) = cwd {
-        v.push(c.join(".claude").join("settings.json"));
-        v.push(c.join(".claude").join("settings.local.json"));
-    }
-    v
-}
-
-/// Whether the person allowed this mail tool with "Yes, don't ask again"
-/// (an `allow` rule for the tool, or for all of pataka-mail) and did not
-/// deny or ask for it anywhere. That is an explicit yes for small changes;
-/// trash and bulk changes still ask every time.
-fn allowed_by_rule(tool: &str, files: &[PathBuf]) -> bool {
-    let server = tool.rsplit_once("__").map(|(s, _)| s).unwrap_or(tool);
-    let matches = |r: &str| r == tool || r == server || r == format!("{server}__*");
-    let rules = |kind: &str| -> Vec<String> {
-        files
-            .iter()
-            .filter_map(|p| std::fs::read(p).ok())
-            .filter_map(|b| serde_json::from_slice::<Value>(&b).ok())
-            .flat_map(|v| {
-                v["permissions"][kind]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            })
-            .collect()
+    let mode = input["permission_mode"].as_str().unwrap_or("");
+    let Some(reason) = guards::review_local(tool, &tool_input, cwd.as_deref()) else {
+        return (mode == "auto").then(|| allow("Pātaka allows this in auto mode; it is logged and can be undone."));
     };
-    let deny_or_ask: Vec<String> = rules("deny").into_iter().chain(rules("ask")).collect();
-    rules("allow").iter().any(|r| matches(r)) && !deny_or_ask.iter().any(|r| matches(r))
+    let (decision, text) = if matches!(mode, "bypassPermissions" | "dontAsk") {
+        (
+            "deny",
+            format!("Pātaka refused: {reason}, and permission prompts are switched off. Switch to the default or auto mode to approve it."),
+        )
+    } else {
+        ("ask", format!("Pātaka asks because {reason}. Email and calendar invitations can contain instructions aimed at Claude, so check this is what you asked for."))
+    };
+    Some(
+        json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
+                "permissionDecisionReason": text}}),
+    )
+}
+
+fn allow(reason: &str) -> Value {
+    json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+            "permissionDecisionReason": reason}})
 }
 
 /// The file paths a draft names, with any placeholders put back by the
@@ -308,33 +295,6 @@ fn restore_draft_paths(tool_input: &mut Value) {
     }
 }
 
-fn mail_decision_with(input: &Value, allowed: bool) -> Option<Value> {
-    let tool = input["tool_name"].as_str().unwrap_or("");
-    let strict = defers_to_session(input) && !allowed;
-    let cwd = input["cwd"]
-        .as_str()
-        .map(PathBuf::from)
-        .map(|c| c.canonicalize().unwrap_or(c));
-    let mut tool_input = input["tool_input"].clone();
-    if tool.starts_with(pataka_core::mail::TOOL_PREFIX) && tool.ends_with("__draft") {
-        restore_draft_paths(&mut tool_input);
-    }
-    let reason = guards::review_local(tool, &tool_input, strict, cwd.as_deref())?;
-    let mode = input["permission_mode"].as_str().unwrap_or("");
-    let (decision, text) = if matches!(mode, "bypassPermissions" | "dontAsk") {
-        (
-            "deny",
-            format!("Pātaka refused: {reason}, and permission prompts are switched off. Switch to the default or auto mode to approve it."),
-        )
-    } else {
-        ("ask", format!("Pātaka asks because {reason}. Email and calendar invitations can contain instructions aimed at Claude, so check this is what you asked for."))
-    };
-    Some(
-        json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
-                "permissionDecisionReason": text}}),
-    )
-}
-
 /// `pataka hook pretool`: Claude Code's PreToolUse hook.
 pub fn hook_pretool() -> Result<i32> {
     let input = stdin_json();
@@ -344,6 +304,15 @@ pub fn hook_pretool() -> Result<i32> {
         if let Some(out) = mail_decision(&input) {
             println!("{out}");
         }
+        return Ok(0);
+    }
+    // The inbox-triage skill reads the person's own setup on every run.
+    if tool == "Read"
+        && input["tool_input"]["file_path"]
+            .as_str()
+            .is_some_and(guards::is_triage_setup)
+    {
+        println!("{}", allow("Pātaka allows reading your inbox-triage setup."));
         return Ok(0);
     }
     if defers_to_session(&input) {
@@ -392,18 +361,8 @@ mod tests {
         assert!(!defers_to_session(&json!({})));
     }
 
-    fn mail(tool: &str, n: usize, mode: &str) -> Option<String> {
-        mail_allowed(tool, n, mode, false)
-    }
-
-    fn mail_allowed(tool: &str, n: usize, mode: &str, allowed: bool) -> Option<String> {
-        let ids: Vec<String> = (0..n).map(|i| format!("mail_1_{i}")).collect();
-        mail_decision_with(
-            &json!({"tool_name": format!("mcp__pataka-mail__{tool}"), "permission_mode": mode,
-                    "tool_input": {"ids": ids}}),
-            allowed,
-        )
-        .map(|v| {
+    fn decide(tool: &str, mode: &str, tool_input: Value) -> Option<String> {
+        mail_decision(&json!({"tool_name": tool, "permission_mode": mode, "tool_input": tool_input})).map(|v| {
             v["hookSpecificOutput"]["permissionDecision"]
                 .as_str()
                 .unwrap()
@@ -411,68 +370,52 @@ mod tests {
         })
     }
 
-    #[test]
-    fn dont_ask_again_is_honoured_for_small_changes_only() {
-        // "Yes, don't ask again" for label: small labels stop asking, even in auto mode…
-        assert_eq!(mail_allowed("label", 3, "auto", true), None);
-        // …but bulk changes and trash still ask.
-        assert_eq!(mail_allowed("label", 26, "auto", true).as_deref(), Some("ask"));
-        assert_eq!(mail_allowed("trash", 1, "auto", true).as_deref(), Some("ask"));
+    fn mail(tool: &str, n: usize, mode: &str) -> Option<String> {
+        let ids: Vec<String> = (0..n).map(|i| format!("mail_1_{i}")).collect();
+        decide(&format!("mcp__pataka-mail__{tool}"), mode, json!({"ids": ids}))
     }
 
     #[test]
-    fn allow_rules_are_read_from_settings_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("settings.local.json");
-        std::fs::write(&f, r#"{"permissions": {"allow": ["mcp__pataka-mail__label"]}}"#).unwrap();
-        let files = vec![f.clone(), dir.path().join("missing.json")];
-        assert!(allowed_by_rule("mcp__pataka-mail__label", &files));
-        assert!(!allowed_by_rule("mcp__pataka-mail__archive", &files));
-        std::fs::write(&f, r#"{"permissions": {"allow": ["mcp__pataka-mail"]}}"#).unwrap();
-        assert!(allowed_by_rule("mcp__pataka-mail__archive", &files));
-        // A deny or ask rule anywhere wins.
-        let g = dir.path().join("settings.json");
-        std::fs::write(&g, r#"{"permissions": {"ask": ["mcp__pataka-mail__archive"]}}"#).unwrap();
-        assert!(!allowed_by_rule("mcp__pataka-mail__archive", &[f, g]));
-    }
-
-    #[test]
-    fn calendar_changes_are_not_left_to_auto_mode() {
-        let decide = |tool: &str, mode: &str| {
-            mail_decision_with(
-                &json!({"tool_name": format!("mcp__pataka-calendar__{tool}"), "permission_mode": mode,
-                        "tool_input": {"title": "Hui", "start": "2026-12-03"}}),
-                false,
+    fn calendar_changes_are_allowed_in_auto_mode() {
+        let cal = |tool: &str, mode: &str| {
+            decide(
+                &format!("mcp__pataka-calendar__{tool}"),
+                mode,
+                json!({"title": "Hui", "start": "2026-12-03"}),
             )
-            .map(|v| {
-                v["hookSpecificOutput"]["permissionDecision"]
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
         };
-        assert_eq!(decide("events", "auto"), None);
-        assert_eq!(decide("create_event", "default"), None);
-        assert_eq!(decide("create_event", "auto").as_deref(), Some("ask"));
-        assert_eq!(decide("delete_event", "default").as_deref(), Some("ask"));
-        assert_eq!(decide("create_event", "dontAsk").as_deref(), Some("deny"));
+        assert_eq!(cal("events", "auto").as_deref(), Some("allow"));
+        assert_eq!(cal("events", "default"), None);
+        assert_eq!(cal("create_event", "default"), None);
+        assert_eq!(cal("create_event", "auto").as_deref(), Some("allow"));
+        assert_eq!(cal("update_event", "auto").as_deref(), Some("allow"));
+        // Deleting always asks, and is refused with prompts off.
+        assert_eq!(cal("delete_event", "auto").as_deref(), Some("ask"));
+        assert_eq!(cal("delete_event", "default").as_deref(), Some("ask"));
+        assert_eq!(cal("delete_event", "dontAsk").as_deref(), Some("deny"));
     }
 
     #[test]
-    fn mail_changes_are_not_left_to_auto_mode() {
-        // Reading never asks, in any mode.
+    fn mail_changes_are_allowed_in_auto_mode() {
+        // Reading and small changes: allowed in auto mode, left to Claude Code otherwise.
         assert_eq!(mail("search", 0, "default"), None);
-        assert_eq!(mail("read", 0, "auto"), None);
-        // Small changes follow Claude Code's own settings, except in auto mode.
+        assert_eq!(mail("read", 0, "auto").as_deref(), Some("allow"));
         assert_eq!(mail("label", 3, "default"), None);
-        assert_eq!(mail("label", 3, "auto").as_deref(), Some("ask"));
+        for t in ["label", "archive", "move", "mark", "create_label"] {
+            assert_eq!(mail(t, 3, "auto").as_deref(), Some("allow"), "{t}");
+        }
+        assert_eq!(mail("label", 3, "bypassPermissions"), None);
         // Bulk changes and trash always ask.
         assert_eq!(mail("archive", 26, "default").as_deref(), Some("ask"));
+        assert_eq!(mail("archive", 26, "auto").as_deref(), Some("ask"));
         assert_eq!(mail("trash", 1, "acceptEdits").as_deref(), Some("ask"));
         assert_eq!(mail("trash", 1, "auto").as_deref(), Some("ask"));
         // With prompts off, a change that needs a yes is refused.
         assert_eq!(mail("trash", 1, "bypassPermissions").as_deref(), Some("deny"));
-        assert_eq!(mail("mark", 2, "dontAsk").as_deref(), Some("deny"));
+        assert_eq!(mail("archive", 30, "dontAsk").as_deref(), Some("deny"));
+        // A draft with a file from outside the folder still asks.
+        let far = json!({"body": "x", "attachments": ["/etc/hosts"]});
+        assert_eq!(decide("mcp__pataka-mail__draft", "auto", far).as_deref(), Some("ask"));
     }
 
     #[test]
