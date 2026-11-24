@@ -118,6 +118,56 @@ fn shell_words(command: &str) -> Vec<String> {
         .collect()
 }
 
+/// The words of a command as the shell would read them: quotes keep a
+/// path with spaces in one piece (`"…/Application Support/…"`), and a
+/// backslash keeps the next character. A quoted word that runs a command
+/// (`$(…)` or backticks) is also split as `shell_words` would, so nothing
+/// inside it is missed.
+fn quoted_words(command: &str) -> Vec<String> {
+    let separator =
+        |c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '`' | '<' | '>' | '{' | '}');
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut runs = false;
+    let mut chars = command.chars();
+    let push = |word: &mut String, runs: &mut bool, words: &mut Vec<String>| {
+        if *runs {
+            words.extend(shell_words(word));
+        }
+        if !word.is_empty() {
+            words.push(std::mem::take(word));
+        }
+        *runs = false;
+    };
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') => {
+                if let Some(n) = chars.next() {
+                    word.push(n);
+                }
+            }
+            (Some(_), c) => {
+                if c == '`' || (c == '(' && word.ends_with('$')) {
+                    runs = true;
+                }
+                word.push(c);
+            }
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '\\') => {
+                if let Some(n) = chars.next() {
+                    word.push(n);
+                }
+            }
+            (None, c) if separator(c) => push(&mut word, &mut runs, &mut words),
+            (None, c) => word.push(c),
+        }
+    }
+    push(&mut word, &mut runs, &mut words);
+    words
+}
+
 fn looks_like_path(w: &str) -> bool {
     w.starts_with('/')
         || w.starts_with("~/")
@@ -146,7 +196,7 @@ pub fn review_command(command: &str, workspace: &Path) -> Option<String> {
             }
         }
     }
-    for w in shell_words(command) {
+    for w in quoted_words(command) {
         let w = w.split('=').next_back().unwrap_or(&w).to_string();
         if looks_like_path(&w)
             && !SYSTEM_PREFIXES
@@ -411,6 +461,29 @@ mod tests {
         assert!(review_tool("Read", &json!({"file_path": "/etc/passwd"}), &ws()).is_some());
         assert!(review_tool("Edit", &json!({"file_path": "/home/kaiako/project/app.py"}), &ws()).is_none());
         assert!(review_tool("Write", &json!({"file_path": "/home/kaiako/project/../x"}), &ws()).is_some());
+    }
+
+    #[test]
+    fn quoted_paths_with_spaces_stay_whole() {
+        let ws = PathBuf::from("/Users/kaiako/Library/Application Support/nz.pataka.desktop/agents/a1");
+        for c in [
+            "ls \"/Users/kaiako/Library/Application Support/nz.pataka.desktop/agents/a1\"",
+            "cat '/Users/kaiako/Library/Application Support/nz.pataka.desktop/agents/a1/notes.md' | wc -l",
+            "cd /Users/kaiako/Library/Application\\ Support/nz.pataka.desktop/agents/a1 && ls",
+            "python3 \"/Users/kaiako/Library/Application Support/nz.pataka.desktop/agents/a1/x.py\" > out.txt",
+        ] {
+            assert_eq!(review_command(c, &ws), None, "{c}");
+        }
+        // Outside the folder still asks, quoted or not, and so does a path
+        // inside a command substitution in quotes.
+        for c in [
+            "cat \"/Users/kaiako/Library/Application Support/other/secret.txt\"",
+            "cat '/Users/kaiako/.ssh/id_ed25519'",
+            "echo \"$(cat /etc/passwd)\"",
+            "echo \"`cat /etc/passwd`\"",
+        ] {
+            assert!(review_command(c, &ws).is_some(), "{c}");
+        }
     }
 
     #[test]

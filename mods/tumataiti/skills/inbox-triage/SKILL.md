@@ -36,8 +36,10 @@ Never use `trash`, `move`, `mark` or `draft` during triage, nor `delete_event`. 
 
 Each round trip to the model takes a while, so do as much as you can in each:
 
-- Make independent calls together, in one turn: the searches of steps 1, 2 and 3, `drafts` and `list_calendars` at the start; the `events` checks for several days in step 4.
+- Make independent calls together, in one turn, but **at most two `pataka-mail` calls at a time**: every result is checked for personal details on this computer one after another, and more at once wait their turn until they time out. Calendar calls are small and can go alongside.
 - Read threads with `threads`, up to 5 per call, never one `thread` call each. Gather the thread ids you need from the searches first.
+- If a call times out, send it again on its own. Never judge from a snippet, or skip a check, because a call failed: retry it, and if it fails again, say in the report what you could not check.
+- Replies in a thread come without the earlier messages they quote (those are in the thread already) and without signatures. If you need one message whole, `read` it by its id.
 - Do not read a thread twice in one triage: keep what you learned from it for the later steps.
 - Batch changes: one `label` call per label and one `archive` call for all threads to archive, rather than one call per thread.
 
@@ -62,7 +64,7 @@ For each inbox thread with the TODO label, work out its objective and judge whet
 
 ## 3. Clean up closed quests
 
-`search` with `label:<TODO label as a search slug> -in:inbox` (the slug is the label name in lower case with spaces and `/` as `-`, e.g. `Side Quests/TODO` → `side-quests-todo`). Remove the TODO label from those threads (the user archiving a thread is their signal it is complete). Do not change their other labels. Paginate; this may be large on the first run.
+`search` with `label:<TODO label as a search slug> -in:inbox` (the slug is the label name in lower case with spaces and `/` as `-`, e.g. `Side Quests/TODO` → `side-quests-todo`). Gmail applies `-in:inbox` to each message, not each thread, so this also finds the user's sent replies inside threads that are still in the Inbox. **Skip every result whose thread id is one of the inbox threads from step 1**: those quests are live. Remove the TODO label only from the rest, the threads with no message left in the Inbox (the user archiving a thread is their signal it is complete). Do not change their other labels. Paginate; this may be large on the first run.
 
 ## 4. Add events to the calendar
 
